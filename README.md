@@ -33,7 +33,7 @@ Add the `TexFury` project reference or NuGet package. The pre-compiled `texfury_
 ```csharp
 using TexFury;
 
-var tex = Texture.FromImage("logo.png", format: BCFormat.BC7, quality: 0.8f);
+Texture tex = Texture.FromImage("logo.png", format: BCFormat.BC7, quality: 0.8f);
 tex.SaveDds("logo.dds");
 ```
 
@@ -129,7 +129,7 @@ tex.Data       // byte[] — raw pixel data (all mip levels concatenated)
 Load an image file and compress it.
 
 ```csharp
-var tex = Texture.FromImage(
+Texture tex = Texture.FromImage(
     "photo.png",
     format: BCFormat.BC7,            // default
     quality: 0.7f,                   // 0.0 = fastest, 1.0 = best quality
@@ -149,7 +149,7 @@ Create from raw RGBA pixel data in memory.
 
 ```csharp
 byte[] pixels = GetPixelsFromSomewhere();
-var tex = Texture.FromPixels(pixels, 512, 512, format: BCFormat.BC3, quality: 0.9f);
+Texture tex = Texture.FromPixels(pixels, 512, 512, format: BCFormat.BC3, quality: 0.9f);
 tex.SaveDds("result.dds");
 ```
 
@@ -158,7 +158,7 @@ tex.SaveDds("result.dds");
 Load an existing DDS file.
 
 ```csharp
-var tex = Texture.FromDds("existing.dds");
+Texture tex = Texture.FromDds("existing.dds");
 Console.WriteLine($"{tex.Format} {tex.Width}x{tex.Height} ({tex.MipCount} mips)");
 ```
 
@@ -167,7 +167,7 @@ Console.WriteLine($"{tex.Format} {tex.Width}x{tex.Height} ({tex.MipCount} mips)"
 Create from raw compressed pixel data (advanced / internal use).
 
 ```csharp
-var tex = Texture.FromRaw(
+Texture tex = Texture.FromRaw(
     data: rawBytes,
     width: 256, height: 256,
     format: BCFormat.BC7,
@@ -206,7 +206,7 @@ File.WriteAllBytes("output.dds", ddsData);
 ```csharp
 using TexFury;
 
-var ytd = new YtdFile();
+YtdFile ytd = new YtdFile();
 ytd.Add(Texture.FromImage("diffuse.png", format: BCFormat.BC7));
 ytd.Add(Texture.FromImage("normal.png", format: BCFormat.BC5));
 ytd.Add(Texture.FromImage("specular.png", format: BCFormat.BC1));
@@ -218,17 +218,17 @@ Console.WriteLine(ytd.Count); // 3
 #### Loading and Inspecting a YTD
 
 ```csharp
-var ytd = YtdFile.Load("vehicles.ytd");
+YtdFile ytd = YtdFile.Load("vehicles.ytd");
 
-foreach (var tex in ytd.Textures)
+foreach (Texture tex in ytd.Textures)
     Console.WriteLine($"{tex.Name}: {tex.Width}x{tex.Height} {tex.Format} ({tex.MipCount} mips)");
 ```
 
 #### Extracting to DDS
 
 ```csharp
-var ytd = YtdFile.Load("props.ytd");
-foreach (var tex in ytd.Textures)
+YtdFile ytd = YtdFile.Load("props.ytd");
+foreach (Texture tex in ytd.Textures)
     tex.SaveDds($"extracted/{tex.Name}.dds");
 ```
 
@@ -341,8 +341,8 @@ ImageUtils.NextPowerOfTwo(500);  // 512
 Get power-of-two dimensions for a given size.
 
 ```csharp
-var (w, h) = ImageUtils.PotDimensions(300, 400);   // (512, 512)
-var (w2, h2) = ImageUtils.PotDimensions(1920, 1080); // (2048, 2048)
+(int w, int h) = ImageUtils.PotDimensions(300, 400);   // (512, 512)
+(int w2, int h2) = ImageUtils.PotDimensions(1920, 1080); // (2048, 2048)
 ```
 
 #### `ImageUtils.ImageDimensions(path)`
@@ -350,7 +350,7 @@ var (w2, h2) = ImageUtils.PotDimensions(1920, 1080); // (2048, 2048)
 Get width, height, and channel count of an image.
 
 ```csharp
-var (w, h, ch) = ImageUtils.ImageDimensions("photo.png");
+(int w, int h, int ch) = ImageUtils.ImageDimensions("photo.png");
 Console.WriteLine($"{w}x{h}, {ch} channels"); // e.g. 1920x1080, 4 channels
 ```
 
@@ -365,11 +365,11 @@ using TexFury;
 
 Texture SmartCompress(string path, float quality = 0.8f)
 {
-    var fmt = ImageUtils.HasTransparency(path) ? BCFormat.BC3 : BCFormat.BC1;
+    BCFormat fmt = ImageUtils.HasTransparency(path) ? BCFormat.BC3 : BCFormat.BC1;
     return Texture.FromImage(path, format: fmt, quality: quality);
 }
 
-var tex = SmartCompress("my_texture.png");
+Texture tex = SmartCompress("my_texture.png");
 tex.SaveDds("my_texture.dds");
 ```
 
@@ -378,7 +378,7 @@ tex.SaveDds("my_texture.dds");
 ```csharp
 using TexFury;
 
-var ytd = new YtdFile();
+YtdFile ytd = new YtdFile();
 
 // Opaque diffuse — BC1 is fine, smallest size
 ytd.Add(Texture.FromImage("body_d.png", format: BCFormat.BC1, quality: 0.7f));
