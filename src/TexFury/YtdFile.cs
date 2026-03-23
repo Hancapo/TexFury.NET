@@ -202,8 +202,8 @@ public sealed class YtdFile
 
         // Phase 4: physical data
         byte[] pbuf = new byte[physCur];
-        foreach (var (e, physOff) in entries.Zip(physOffsets))
-            Array.Copy(e.Data, 0, pbuf, physOff, e.Data.Length);
+        for (int i = 0; i < entries.Count; i++)
+            Array.Copy(entries[i].Data, 0, pbuf, physOffsets[i], entries[i].Data.Length);
 
         return Resource.BuildRsc7(vbuf, pbuf);
     }

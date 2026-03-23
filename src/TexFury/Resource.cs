@@ -60,7 +60,7 @@ internal static class Resource
     public static byte[] DeflateCompress(byte[] data)
     {
         using var ms = new MemoryStream();
-        using (var ds = new DeflateStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
+        using (var ds = new DeflateStream(ms, CompressionLevel.Optimal, leaveOpen: true))
             ds.Write(data);
         return ms.ToArray();
     }
