@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TexFury/TexFury.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TexFury.Tests/TexFury.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>TexFury</RootNamespace>
+    <AssemblyName>TexFury</AssemblyName>
+    <Version>1.0.0</Version>
+    <Authors>Hancapo</Authors>
+    <Description>Fast image-to-DDS conversion and YTD texture dictionary toolkit</Description>
+    <PackageId>TexFury</PackageId>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>dds;texture;bc7;compression;ytd;mipmap</PackageTags>
+    <RepositoryUrl>https://github.com/Hancapo/TexFury.NET</RepositoryUrl>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="runtimes\win-x64\native\texfury_native.dll">
+      <Pack>true</Pack>
+      <PackagePath>runtimes\win-x64\native</PackagePath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
