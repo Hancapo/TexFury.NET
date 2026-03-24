@@ -125,7 +125,132 @@ public sealed class Texture
     public byte[] ToDdsBytes() =>
         DdsBuilder.Build(Width, Height, Format, MipCount, MipSizes, Data);
 
+    // ── Decompression ───────────────────────────────────────────────────
+
+    /// <summary>Decompress to raw RGBA pixels.</summary>
+    /// <returns>(rgbaBytes, width, height) for the given mip level.</returns>
+    public (byte[] Rgba, int Width, int Height) ToRgba(int mip = 0)
+    {
+        IntPtr c = ToCompressedHandle();
+        try
+        {
+            IntPtr ptr = NativeMethods.tf_decompress(c, mip, out int w, out int h);
+            if (ptr == IntPtr.Zero)
+                throw new InvalidOperationException($"Failed to decompress mip {mip}");
+            try
+            {
+                byte[] rgba = new byte[w * h * 4];
+                Marshal.Copy(ptr, rgba, 0, rgba.Length);
+                return (rgba, w, h);
+            }
+            finally
+            {
+                NativeMethods.tf_free_buffer(ptr);
+            }
+        }
+        finally
+        {
+            NativeMethods.tf_free_compressed(c);
+        }
+    }
+
+    // ── Quality metrics ─────────────────────────────────────────────────
+
+    /// <summary>Compare this texture against original RGBA pixels.</summary>
+    /// <returns>Dictionary with keys: PsnrRgb, PsnrRgba, Ssim.</returns>
+    public QualityMetrics QualityMetrics(byte[] originalRgba)
+    {
+        var (decompressed, w, h) = ToRgba(0);
+
+        unsafe
+        {
+            fixed (byte* origPtr = originalRgba)
+            fixed (byte* decPtr = decompressed)
+            {
+                double psnrRgb = NativeMethods.tf_psnr((IntPtr)origPtr, (IntPtr)decPtr, w, h, 3);
+                double psnrRgba = NativeMethods.tf_psnr((IntPtr)origPtr, (IntPtr)decPtr, w, h, 4);
+                double ssim = NativeMethods.tf_ssim((IntPtr)origPtr, (IntPtr)decPtr, w, h);
+                return new QualityMetrics(psnrRgb, psnrRgba, ssim);
+            }
+        }
+    }
+
+    // ── Validation ──────────────────────────────────────────────────────
+
+    /// <summary>Check texture for common issues. Empty list means everything is OK.</summary>
+    public List<string> Validate()
+    {
+        var warnings = new List<string>();
+
+        if (Width <= 0 || Height <= 0)
+            warnings.Add($"Invalid dimensions: {Width}x{Height}");
+
+        if ((Width & (Width - 1)) != 0 || (Height & (Height - 1)) != 0)
+            warnings.Add($"Non-power-of-two dimensions: {Width}x{Height}");
+
+        if (Formats.IsBlockCompressed(Format) && (Width < 4 || Height < 4))
+            warnings.Add($"Dimensions {Width}x{Height} below minimum 4x4 for {Format}");
+
+        if (MipCount < 1)
+            warnings.Add("No mip levels");
+
+        int expected = Formats.TotalMipDataSize(Width, Height, Format, MipCount);
+        if (Data.Length != expected)
+            warnings.Add($"Data size mismatch: expected {expected} bytes, got {Data.Length} bytes");
+
+        if (Width > 16384 || Height > 16384)
+            warnings.Add($"Dimensions {Width}x{Height} exceed 16384 max");
+
+        if (string.IsNullOrEmpty(Name))
+            warnings.Add("Texture has no name");
+
+        return warnings;
+    }
+
+    // ── Inspection ──────────────────────────────────────────────────────
+
+    /// <summary>Read DDS metadata without loading pixel data.</summary>
+    public static TextureInfo InspectDds(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        IntPtr c = NativeMethods.tf_load_dds(fullPath);
+        if (c == IntPtr.Zero)
+            throw new FileNotFoundException($"Failed to load DDS: {path}");
+        try
+        {
+            var fmt = (BCFormat)NativeMethods.tf_compressed_format(c);
+            return new TextureInfo(
+                Path.GetFileNameWithoutExtension(path).ToLowerInvariant(),
+                NativeMethods.tf_compressed_width(c),
+                NativeMethods.tf_compressed_height(c),
+                fmt,
+                NativeMethods.tf_compressed_mip_count(c),
+                (int)NativeMethods.tf_compressed_size(c));
+        }
+        finally
+        {
+            NativeMethods.tf_free_compressed(c);
+        }
+    }
+
     // ── Internal ─────────────────────────────────────────────────────────
+
+    private IntPtr ToCompressedHandle()
+    {
+        string tmpPath = Path.GetTempFileName() + ".dds";
+        try
+        {
+            File.WriteAllBytes(tmpPath, ToDdsBytes());
+            IntPtr c = NativeMethods.tf_load_dds(tmpPath);
+            if (c == IntPtr.Zero)
+                throw new InvalidOperationException("Failed to create compressed handle");
+            return c;
+        }
+        finally
+        {
+            try { File.Delete(tmpPath); } catch { }
+        }
+    }
 
     private static Texture CompressImage(IntPtr img, BCFormat format, float quality,
         bool generateMipmaps, int minMipSize, bool resizeToPot,

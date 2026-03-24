@@ -23,6 +23,92 @@ public sealed class YtdFile
 
     public int Count => _textures.Count;
 
+    /// <summary>Get the list of texture names in this YTD.</summary>
+    public List<string> Names() => _textures.Select(t => t.Name).ToList();
+
+    /// <summary>Check if a texture with the given name exists.</summary>
+    public bool Contains(string name) =>
+        _textures.Any(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Get a texture by name.</summary>
+    public Texture Get(string name)
+    {
+        var tex = _textures.FirstOrDefault(t =>
+            t.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (tex == null)
+            throw new KeyNotFoundException($"Texture '{name}' not found in YTD");
+        return tex;
+    }
+
+    /// <summary>Replace an existing texture by name.</summary>
+    public void Replace(string name, Texture texture)
+    {
+        for (int i = 0; i < _textures.Count; i++)
+        {
+            if (_textures[i].Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                if (texture.Name != _textures[i].Name)
+                    texture.Name = _textures[i].Name;
+                _textures[i] = texture;
+                return;
+            }
+        }
+        throw new KeyNotFoundException($"Texture '{name}' not found in YTD");
+    }
+
+    /// <summary>Remove a texture by name.</summary>
+    public bool Remove(string name)
+    {
+        int idx = _textures.FindIndex(t =>
+            t.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (idx < 0) return false;
+        _textures.RemoveAt(idx);
+        return true;
+    }
+
+    /// <summary>Inspect a YTD file without fully loading pixel data.</summary>
+    public static List<TextureInfo> Inspect(string path)
+    {
+        byte[] fileData = File.ReadAllBytes(path);
+        var (virtualData, physicalData) = Resource.DecompressRsc7(fileData);
+
+        int count = R16(virtualData, 0x28);
+        long itemsPtr = R64(virtualData, 0x30);
+        int itemsOff = V2O(itemsPtr);
+
+        var result = new List<TextureInfo>();
+
+        for (int i = 0; i < count; i++)
+        {
+            long texPtr = R64(virtualData, itemsOff + 8 * i);
+            int texOff = V2O(texPtr);
+
+            long namePtr = R64(virtualData, texOff + 0x28);
+            int width = R16S(virtualData, texOff + 0x50);
+            int height = R16S(virtualData, texOff + 0x52);
+            uint formatVal = R32(virtualData, texOff + 0x58);
+            int mipLevels = virtualData[texOff + 0x5D];
+
+            int nameOff = V2O(namePtr);
+            int nameEnd = Array.IndexOf(virtualData, (byte)0, nameOff);
+            string name = Encoding.UTF8.GetString(virtualData, nameOff, nameEnd - nameOff);
+
+            BCFormat? fmt = null;
+            try { fmt = Formats.FromDx9(formatVal); } catch { }
+            if (fmt == null) try { fmt = Formats.FromDxgi(formatVal); } catch { }
+
+            string formatName = fmt.HasValue ? fmt.Value.ToString() : $"Unknown(0x{formatVal:X8})";
+            int dataSize = fmt.HasValue
+                ? Formats.TotalMipDataSize(width, height, fmt.Value, mipLevels)
+                : 0;
+
+            result.Add(new TextureInfo(name, width, height,
+                fmt ?? BCFormat.BC7, mipLevels, dataSize));
+        }
+
+        return result;
+    }
+
     public override string ToString()
     {
         var names = _textures.Select(t => t.Name);

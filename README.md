@@ -11,7 +11,12 @@ Built on **bc7enc_rdo** + **ISPC bc7e** for high-quality BC1/BC3/BC4/BC5/BC7 com
 - **BC1, BC3, BC4, BC5, BC7** block compression with adjustable quality (0.0–1.0)
 - **A8R8G8B8** uncompressed 32-bit BGRA format
 - **DDS** file read/write (legacy + DX10 extended headers)
-- **YTD** texture dictionary creation and extraction
+- **YTD** texture dictionary creation, extraction, and editing
+- **Decompression** — decompress any texture back to RGBA pixels
+- **Format suggestion** — auto-detect the best BCFormat for your image
+- **Quality metrics** — PSNR (RGB/RGBA) and SSIM comparison
+- **Texture validation** — detect common issues (non-POT, size mismatch, etc.)
+- **DDS/YTD inspection** — read metadata without loading pixel data
 - **Mipmap generation** with configurable minimum size and 6 downsampling filters
 - **Automatic power-of-two resize** (sRGB-aware via stb_image_resize2)
 - **Transparency detection** without manual pixel iteration
@@ -178,6 +183,39 @@ var tex = Texture.FromRaw(
 );
 ```
 
+#### Decompression & Analysis
+
+##### `tex.ToRgba(mip)`
+
+Decompress to raw RGBA pixels. Returns `(byte[] Rgba, int Width, int Height)`.
+
+```csharp
+var (rgba, w, h) = tex.ToRgba();    // mip 0
+var (rgba1, w1, h1) = tex.ToRgba(1); // mip 1
+```
+
+##### `tex.QualityMetrics(originalRgba)`
+
+Compare compressed texture against original RGBA pixels. Returns a `QualityMetrics` object with `PsnrRgb`, `PsnrRgba`, and `Ssim` properties.
+
+##### `tex.Validate()`
+
+Check for common issues. Returns `List<string>` — empty means OK.
+
+##### `Texture.InspectDds(path)`
+
+Read DDS metadata without loading pixel data. Returns a `TextureInfo` object.
+
+#### Format Suggestion
+
+##### `Formats.SuggestFormat(hasAlpha, normalMap, singleChannel, qualityOverSize)`
+
+Returns the recommended `BCFormat` based on image characteristics.
+
+```csharp
+var fmt = Formats.SuggestFormat(hasAlpha: true);  // BC7
+```
+
 #### Saving Textures
 
 ##### `tex.SaveDds(path)`
@@ -222,6 +260,25 @@ var ytd = YtdFile.Load("vehicles.ytd");
 
 foreach (var tex in ytd.Textures)
     Console.WriteLine($"{tex.Name}: {tex.Width}x{tex.Height} {tex.Format} ({tex.MipCount} mips)");
+```
+
+#### Editing Textures
+
+```csharp
+var ytd = YtdFile.Load("vehicles.ytd");
+
+ytd.Names();                  // List<string> of texture names
+ytd.Contains("body_d");       // bool
+ytd.Get("body_d");            // Texture (throws KeyNotFoundException if missing)
+ytd.Replace("body_d", newTex); // replace in-place, keeps original name
+ytd.Remove("old_texture");    // returns true if removed, false if not found
+```
+
+#### Inspecting a YTD
+
+```csharp
+var entries = YtdFile.Inspect("vehicles.ytd");
+// Returns List<TextureInfo> — metadata only, no pixel data loaded
 ```
 
 #### Extracting to DDS
@@ -393,6 +450,100 @@ ytd.Add(Texture.FromImage("body_s.png", format: BCFormat.BC3, quality: 0.7f));
 ytd.Add(Texture.FromImage("body_e.png", format: BCFormat.A8R8G8B8));
 
 ytd.Save("body.ytd");
+```
+
+### Decompress a texture to RGBA pixels
+
+```csharp
+using TexFury;
+
+var tex = Texture.FromDds("diffuse.dds");
+var (rgba, w, h) = tex.ToRgba();       // mip 0 (full resolution)
+var (rgba1, w1, h1) = tex.ToRgba(1);   // mip 1 (half resolution)
+```
+
+### Suggest the best format for an image
+
+```csharp
+using TexFury;
+
+var fmt = Formats.SuggestFormat(hasAlpha: true);                       // BC7
+var fmt2 = Formats.SuggestFormat(hasAlpha: true, qualityOverSize: false); // BC3
+var fmt3 = Formats.SuggestFormat(hasAlpha: false, normalMap: true);    // BC5
+var fmt4 = Formats.SuggestFormat(hasAlpha: false, singleChannel: true); // BC4
+
+// Combined with transparency detection:
+var format = Formats.SuggestFormat(ImageUtils.HasTransparency("icon.png"));
+var tex = Texture.FromImage("icon.png", format: format);
+```
+
+### Measure compression quality
+
+```csharp
+using TexFury;
+
+// Load raw pixels, compress, then compare
+byte[] originalRgba = GetOriginalPixels();
+var tex = Texture.FromPixels(originalRgba, 512, 512, format: BCFormat.BC7);
+
+var metrics = tex.QualityMetrics(originalRgba);
+Console.WriteLine($"PSNR RGB:  {metrics.PsnrRgb:F2} dB");
+Console.WriteLine($"PSNR RGBA: {metrics.PsnrRgba:F2} dB");
+Console.WriteLine($"SSIM:      {metrics.Ssim:F4}");
+```
+
+### Validate a texture
+
+```csharp
+using TexFury;
+
+var tex = Texture.FromDds("suspect.dds");
+var warnings = tex.Validate();
+
+if (warnings.Count == 0)
+    Console.WriteLine("Texture is OK");
+else
+    foreach (var w in warnings)
+        Console.WriteLine($"Warning: {w}");
+```
+
+Checks for: invalid dimensions, non-POT, below-minimum BC size, missing mips, data size mismatch, oversized textures, missing name.
+
+### Inspect DDS/YTD metadata without loading pixel data
+
+```csharp
+using TexFury;
+
+// Inspect a single DDS file
+var info = Texture.InspectDds("large_texture.dds");
+Console.WriteLine($"{info.Name}: {info.Width}x{info.Height} {info.Format} ({info.MipCount} mips, {info.DataSize} bytes)");
+
+// Inspect all textures inside a YTD
+var entries = YtdFile.Inspect("vehicles.ytd");
+foreach (var entry in entries)
+    Console.WriteLine($"{entry.Name}: {entry.Width}x{entry.Height} {entry.Format}");
+```
+
+### Edit a YTD — replace, remove, query textures
+
+```csharp
+using TexFury;
+
+var ytd = YtdFile.Load("vehicles.ytd");
+
+// Query
+var names = ytd.Names();                     // List<string>
+bool has = ytd.Contains("body_d");           // true/false
+var tex = ytd.Get("body_d");                 // Texture (throws if not found)
+
+// Replace a single texture
+var newTex = Texture.FromImage("body_d_new.png", format: BCFormat.BC7);
+ytd.Replace("body_d", newTex);               // keeps original name
+
+// Remove a texture
+ytd.Remove("old_unused_texture");
+
+ytd.Save("vehicles_modified.ytd");
 ```
 
 ### Re-pack an existing YTD with different compression

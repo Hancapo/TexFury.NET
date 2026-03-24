@@ -104,6 +104,17 @@ internal static class Formats
         _ => throw new ArgumentException($"Unsupported DXGI format: {code}"),
     };
 
+    /// <summary>Suggest the best BCFormat based on image characteristics.</summary>
+    public static BCFormat SuggestFormat(bool hasAlpha,
+        bool normalMap = false, bool singleChannel = false,
+        bool qualityOverSize = true)
+    {
+        if (normalMap) return BCFormat.BC5;
+        if (singleChannel) return BCFormat.BC4;
+        if (hasAlpha) return qualityOverSize ? BCFormat.BC7 : BCFormat.BC3;
+        return qualityOverSize ? BCFormat.BC7 : BCFormat.BC1;
+    }
+
     public static uint ToFourCC(BCFormat fmt) => fmt switch
     {
         BCFormat.BC1 => FourCC_DXT1,

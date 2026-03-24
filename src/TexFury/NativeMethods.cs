@@ -94,6 +94,17 @@ internal static partial class NativeMethods
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern IntPtr tf_load_dds([MarshalAs(UnmanagedType.LPWStr)] string path);
 
+    // Decompression
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr tf_decompress(IntPtr compressed, int mip, out int outWidth, out int outHeight);
+
+    // Quality metrics
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern double tf_psnr(IntPtr original, IntPtr compressed, int width, int height, int channels);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern double tf_ssim(IntPtr original, IntPtr compressed, int width, int height);
+
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern void tf_free_buffer(IntPtr buffer);
 }
