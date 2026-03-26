@@ -90,6 +90,36 @@ public sealed class Texture
         }
     }
 
+    /// <summary>Load an image from in-memory bytes and compress it.</summary>
+    public static Texture FromBytes(byte[] data,
+        BCFormat format = BCFormat.BC7,
+        float quality = 0.7f,
+        bool generateMipmaps = true,
+        int minMipSize = 4,
+        bool resizeToPot = true,
+        MipFilter mipFilter = MipFilter.Mitchell,
+        string name = "")
+    {
+        unsafe
+        {
+            fixed (byte* ptr = data)
+            {
+                IntPtr img = NativeMethods.tf_load_image_memory((IntPtr)ptr, (nuint)data.Length);
+                if (img == IntPtr.Zero)
+                    throw new InvalidOperationException("Failed to load image from bytes");
+                try
+                {
+                    return CompressImage(img, format, quality, generateMipmaps,
+                                         minMipSize, resizeToPot, mipFilter, name);
+                }
+                finally
+                {
+                    NativeMethods.tf_free_image(img);
+                }
+            }
+        }
+    }
+
     /// <summary>Load an existing DDS file.</summary>
     public static Texture FromDds(string path, string? name = null)
     {
