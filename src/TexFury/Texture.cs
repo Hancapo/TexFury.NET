@@ -18,8 +18,11 @@ public sealed class Texture
     public int[] MipSizes { get; }
     public string Name { get; set; }
 
+    private bool? _hasTransparency;
+
     public Texture(byte[] data, int width, int height, BCFormat format,
-                   int mipCount, int[] mipOffsets, int[] mipSizes, string name = "")
+                   int mipCount, int[] mipOffsets, int[] mipSizes,
+                   string name = "", bool? hasTransparency = null)
     {
         Data = data;
         Width = width;
@@ -29,6 +32,45 @@ public sealed class Texture
         MipOffsets = mipOffsets;
         MipSizes = mipSizes;
         Name = name;
+        _hasTransparency = hasTransparency;
+    }
+
+    // ── Instance properties ─────────────────────────────────────────────
+
+    /// <summary>True if both dimensions are powers of two.</summary>
+    public bool IsPowerOfTwo =>
+        Width > 0 && Height > 0 && (Width & (Width - 1)) == 0 && (Height & (Height - 1)) == 0;
+
+    /// <summary>True if the compression format supports an alpha channel.</summary>
+    public bool HasAlphaFormat =>
+        Format is BCFormat.BC3 or BCFormat.BC7 or BCFormat.A8R8G8B8;
+
+    /// <summary>True if the format uses block compression (BC1-BC7).</summary>
+    public bool IsBlockCompressed => Formats.IsBlockCompressed(Format);
+
+    /// <summary>Nearest power-of-two dimensions for this texture.</summary>
+    public (int Width, int Height) PotDimensions =>
+        (NativeMethods.tf_next_power_of_two(Width),
+         NativeMethods.tf_next_power_of_two(Height));
+
+    /// <summary>
+    /// Check if the texture has any non-opaque pixels.
+    /// When created via FromImage/FromBytes/FromPixels, this is detected
+    /// from the original pixels (free). Otherwise decompresses mip 0.
+    /// </summary>
+    public bool HasTransparency()
+    {
+        if (_hasTransparency.HasValue)
+            return _hasTransparency.Value;
+
+        var (rgba, w, h) = ToRgba(0);
+        bool result = false;
+        for (int i = 3; i < rgba.Length; i += 4)
+        {
+            if (rgba[i] != 255) { result = true; break; }
+        }
+        _hasTransparency = result;
+        return result;
     }
 
     // ── Factory methods ──────────────────────────────────────────────────
@@ -299,13 +341,16 @@ public sealed class Texture
 
         try
         {
+            bool transparent = NativeMethods.tf_has_transparency(workImg) != 0;
             IntPtr c = NativeMethods.tf_compress(workImg, (int)format,
                 generateMipmaps ? 1 : 0, minMipSize, quality, (int)mipFilter);
             if (c == IntPtr.Zero)
                 throw new InvalidOperationException("Compression failed");
             try
             {
-                return FromCompressedHandle(c, name);
+                var tex = FromCompressedHandle(c, name);
+                tex._hasTransparency = transparent;
+                return tex;
             }
             finally
             {
