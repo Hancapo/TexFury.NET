@@ -86,8 +86,12 @@ internal static class Resource
         uint sysFlags = EncodeFlags(virtualData.Length);
         uint gfxFlags = physicalData.Length > 0 ? EncodeFlags(physicalData.Length) : 0;
 
-        int sysChunkSize = TotalFromFlags(sysFlags);
-        int gfxChunkSize = gfxFlags != 0 ? TotalFromFlags(gfxFlags) : 0;
+        // Encode version nibbles in bits 28-31 of each flag field.
+        sysFlags |= (uint)(((version >> 4) & 0xF) << 28);
+        gfxFlags |= (uint)((version & 0xF) << 28);
+
+        int sysChunkSize = TotalFromFlags(sysFlags & 0x0FFFFFFF);
+        int gfxChunkSize = gfxFlags != 0 ? TotalFromFlags(gfxFlags & 0x0FFFFFFF) : 0;
 
         byte[] padded = new byte[sysChunkSize + gfxChunkSize];
         Array.Copy(virtualData, 0, padded, 0, virtualData.Length);
@@ -124,8 +128,9 @@ internal static class Resource
     public static (byte[] virtualData, byte[] physicalData) DecompressRsc7(byte[] data)
     {
         var (_, sysFlags, gfxFlags) = ParseRsc7Header(data);
-        int sysSize = TotalFromFlags(sysFlags);
-        int gfxSize = TotalFromFlags(gfxFlags);
+        // Mask out version nibbles (bits 28-31) before computing page sizes.
+        int sysSize = TotalFromFlags(sysFlags & 0x0FFFFFFF);
+        int gfxSize = TotalFromFlags(gfxFlags & 0x0FFFFFFF);
 
         byte[] raw = DeflateDecompress(data.AsSpan(16).ToArray(), sysSize + gfxSize);
 
