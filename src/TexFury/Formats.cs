@@ -11,6 +11,17 @@ internal enum DxgiFormat : uint
     BC7Unorm = 98,
 }
 
+/// <summary>RSC8/Enhanced texture format byte values (DXGI-like).</summary>
+public enum Rsc8TextureFormat : byte
+{
+    BC1Unorm = 0x47,
+    BC3Unorm = 0x4D,
+    BC4Unorm = 0x50,
+    BC5Unorm = 0x53,
+    BC7Unorm = 0x62,
+    B8G8R8A8Unorm = 0x57,
+}
+
 /// <summary>Format constants and utility methods.</summary>
 internal static class Formats
 {
@@ -123,4 +134,64 @@ internal static class Formats
         BCFormat.BC5 => FourCC_ATI2,
         _ => 0,
     };
+
+    public static byte ToRsc8(BCFormat fmt) => fmt switch
+    {
+        BCFormat.BC1 => (byte)Rsc8TextureFormat.BC1Unorm,
+        BCFormat.BC3 => (byte)Rsc8TextureFormat.BC3Unorm,
+        BCFormat.BC4 => (byte)Rsc8TextureFormat.BC4Unorm,
+        BCFormat.BC5 => (byte)Rsc8TextureFormat.BC5Unorm,
+        BCFormat.BC7 => (byte)Rsc8TextureFormat.BC7Unorm,
+        BCFormat.A8R8G8B8 => (byte)Rsc8TextureFormat.B8G8R8A8Unorm,
+        _ => throw new ArgumentOutOfRangeException(nameof(fmt)),
+    };
+
+    public static BCFormat FromRsc8(byte code) => code switch
+    {
+        (byte)Rsc8TextureFormat.BC1Unorm => BCFormat.BC1,
+        (byte)Rsc8TextureFormat.BC3Unorm => BCFormat.BC3,
+        (byte)Rsc8TextureFormat.BC4Unorm => BCFormat.BC4,
+        (byte)Rsc8TextureFormat.BC5Unorm => BCFormat.BC5,
+        (byte)Rsc8TextureFormat.BC7Unorm => BCFormat.BC7,
+        (byte)Rsc8TextureFormat.B8G8R8A8Unorm => BCFormat.A8R8G8B8,
+        _ => throw new ArgumentException($"Unsupported RSC8 format: 0x{code:X2}"),
+    };
+
+    /// <summary>Block stride in bytes. Used by RDR2 and Enhanced.</summary>
+    public static int BlockStride(BCFormat fmt) => fmt switch
+    {
+        BCFormat.BC1 or BCFormat.BC4 => 8,
+        BCFormat.BC3 or BCFormat.BC5 or BCFormat.BC7 => 16,
+        _ => 4, // A8R8G8B8
+    };
+
+    /// <summary>Total block count across all mip levels.</summary>
+    /// <param name="align">Block alignment. null = RDR2-style, 1 = Enhanced (no padding).</param>
+    public static int BlockCount(BCFormat fmt, int width, int height, int depth, int mips,
+                                  int? align = null)
+    {
+        int bs = BlockStride(fmt);
+        int bp = IsBlockCompressed(fmt) ? 4 : 1;
+
+        int bw = width, bh = height;
+        if (mips > 1)
+        {
+            bw = 1; while (bw < width) bw *= 2;
+            bh = 1; while (bh < height) bh *= 2;
+        }
+
+        int a = align ?? (bs == 1 ? 16 : 8);
+        int bc = 0;
+        for (int m = 0; m < mips; m++)
+        {
+            int bx = Math.Max(1, (bw + bp - 1) / bp);
+            int by = Math.Max(1, (bh + bp - 1) / bp);
+            bx += (a - (bx % a)) % a;
+            by += (a - (by % a)) % a;
+            bc += bx * by * depth;
+            bw /= 2;
+            bh /= 2;
+        }
+        return bc;
+    }
 }
