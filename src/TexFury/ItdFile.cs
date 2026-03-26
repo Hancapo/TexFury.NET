@@ -3,44 +3,40 @@ using System.Text;
 
 namespace TexFury;
 
-/// <summary>YTD texture dictionary file.</summary>
-public sealed class YtdFile
+/// <summary>
+/// Internal Texture Dictionary — generic abstraction over RAGE texture
+/// dictionary formats: .ytd (x64) and .wtd (x32) in the future.
+/// </summary>
+public sealed class ItdFile
 {
     private readonly List<Texture> _textures = [];
+    private readonly Game _game;
 
+    public ItdFile(Game game = Game.GtaVLegacy) => _game = game;
+
+    public Game Game => _game;
     public IReadOnlyList<Texture> Textures => _textures.AsReadOnly();
+    public int Count => _textures.Count;
 
     public void Add(Texture texture)
     {
         if (string.IsNullOrEmpty(texture.Name))
-            throw new ArgumentException("Texture must have a name before adding to YTD");
+            throw new ArgumentException("Texture must have a name before adding to ITD");
         _textures.Add(texture);
     }
 
-    public void Save(string path) => File.WriteAllBytes(path, Build());
-
-    public static YtdFile Load(string path) => Parse(File.ReadAllBytes(path));
-
-    public int Count => _textures.Count;
-
-    /// <summary>Get the list of texture names in this YTD.</summary>
     public List<string> Names() => _textures.Select(t => t.Name).ToList();
 
-    /// <summary>Check if a texture with the given name exists.</summary>
     public bool Contains(string name) =>
         _textures.Any(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Get a texture by name.</summary>
     public Texture Get(string name)
     {
         var tex = _textures.FirstOrDefault(t =>
             t.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-        if (tex == null)
-            throw new KeyNotFoundException($"Texture '{name}' not found in YTD");
-        return tex;
+        return tex ?? throw new KeyNotFoundException($"Texture '{name}' not found");
     }
 
-    /// <summary>Replace an existing texture by name.</summary>
     public void Replace(string name, Texture texture)
     {
         for (int i = 0; i < _textures.Count; i++)
@@ -53,10 +49,9 @@ public sealed class YtdFile
                 return;
             }
         }
-        throw new KeyNotFoundException($"Texture '{name}' not found in YTD");
+        throw new KeyNotFoundException($"Texture '{name}' not found");
     }
 
-    /// <summary>Remove a texture by name.</summary>
     public bool Remove(string name)
     {
         int idx = _textures.FindIndex(t =>
@@ -66,53 +61,64 @@ public sealed class YtdFile
         return true;
     }
 
-    /// <summary>Inspect a YTD file without fully loading pixel data.</summary>
+    // ── Save / Load / Inspect ───────────────────────────────────────────
+
+    public void Save(string path)
+    {
+        byte[] data = _game switch
+        {
+            Game.GtaVEnhanced => BuildEnhanced(),
+            Game.Rdr2 => BuildRdr2(),
+            _ => BuildGtaV(),
+        };
+        File.WriteAllBytes(path, data);
+    }
+
+    public static ItdFile Load(string path)
+    {
+        byte[] fileData = File.ReadAllBytes(path);
+        Game game = DetectGame(fileData);
+        return game switch
+        {
+            Game.GtaVEnhanced => ParseEnhanced(fileData),
+            Game.Rdr2 => ParseRdr2(fileData),
+            _ => ParseGtaV(fileData),
+        };
+    }
+
     public static List<TextureInfo> Inspect(string path)
     {
         byte[] fileData = File.ReadAllBytes(path);
-        var (virtualData, physicalData) = Resource.DecompressRsc7(fileData);
-
-        int count = R16(virtualData, 0x28);
-        long itemsPtr = R64(virtualData, 0x30);
-        int itemsOff = V2O(itemsPtr);
-
-        var result = new List<TextureInfo>();
-
-        for (int i = 0; i < count; i++)
+        Game game = DetectGame(fileData);
+        return game switch
         {
-            long texPtr = R64(virtualData, itemsOff + 8 * i);
-            int texOff = V2O(texPtr);
-
-            long namePtr = R64(virtualData, texOff + 0x28);
-            int width = R16S(virtualData, texOff + 0x50);
-            int height = R16S(virtualData, texOff + 0x52);
-            uint formatVal = R32(virtualData, texOff + 0x58);
-            int mipLevels = virtualData[texOff + 0x5D];
-
-            int nameOff = V2O(namePtr);
-            int nameEnd = Array.IndexOf(virtualData, (byte)0, nameOff);
-            string name = Encoding.UTF8.GetString(virtualData, nameOff, nameEnd - nameOff);
-
-            BCFormat? fmt = null;
-            try { fmt = Formats.FromDx9(formatVal); } catch { }
-            if (fmt == null) try { fmt = Formats.FromDxgi(formatVal); } catch { }
-
-            string formatName = fmt.HasValue ? fmt.Value.ToString() : $"Unknown(0x{formatVal:X8})";
-            int dataSize = fmt.HasValue
-                ? Formats.TotalMipDataSize(width, height, fmt.Value, mipLevels)
-                : 0;
-
-            result.Add(new TextureInfo(name, width, height,
-                fmt ?? BCFormat.BC7, mipLevels, dataSize));
-        }
-
-        return result;
+            Game.GtaVEnhanced => InspectEnhanced(fileData),
+            Game.Rdr2 => InspectRdr2(fileData),
+            _ => InspectGtaV(fileData),
+        };
     }
 
     public override string ToString()
     {
         var names = _textures.Select(t => t.Name);
-        return $"YtdFile(Textures=[{string.Join(", ", names)}])";
+        return $"ItdFile(Game={_game}, Textures=[{string.Join(", ", names)}])";
+    }
+
+    // ── Detection ───────────────────────────────────────────────────────
+
+    private static Game DetectGame(byte[] data)
+    {
+        if (data.Length < 16)
+            throw new InvalidDataException("File too short to detect format");
+        uint magic = BinaryPrimitives.ReadUInt32LittleEndian(data);
+        if (magic == Resource.Rsc7Magic)
+        {
+            uint version = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(4));
+            return version == 5 ? Game.GtaVEnhanced : Game.GtaVLegacy;
+        }
+        if (magic == Rsc8.Rsc8Magic)
+            return Game.Rdr2;
+        throw new InvalidDataException($"Unknown format — magic: 0x{magic:X8}");
     }
 
     // ── Constants ────────────────────────────────────────────────────────
@@ -125,7 +131,7 @@ public sealed class YtdFile
         ".tif", ".webp", ".psd", ".gif", ".hdr"
     };
 
-    // ── JOAAT hash ───────────────────────────────────────────────────────
+    // ── Shared helpers ──────────────────────────────────────────────────
 
     private static uint Joaat(string text)
     {
@@ -145,7 +151,45 @@ public sealed class YtdFile
     private static int Align(int offset, int alignment) =>
         (offset + alignment - 1) & ~(alignment - 1);
 
-    // ── Builder ──────────────────────────────────────────────────────────
+    private static int V2O(long addr) => (int)(addr - Resource.VirtualBase);
+    private static int P2O(long addr) => (int)(addr - Resource.PhysicalBase);
+
+    private static ushort R16(byte[] d, int o) => BinaryPrimitives.ReadUInt16LittleEndian(d.AsSpan(o));
+    private static short R16S(byte[] d, int o) => BinaryPrimitives.ReadInt16LittleEndian(d.AsSpan(o));
+    private static uint R32(byte[] d, int o) => BinaryPrimitives.ReadUInt32LittleEndian(d.AsSpan(o));
+    private static long R64(byte[] d, int o) => (long)BinaryPrimitives.ReadUInt64LittleEndian(d.AsSpan(o));
+
+    private static void W16(byte[] d, int o, ushort v) => BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(o), v);
+    private static void W32(byte[] d, int o, uint v) => BinaryPrimitives.WriteUInt32LittleEndian(d.AsSpan(o), v);
+    private static void W64(byte[] d, int o, long v) => BinaryPrimitives.WriteInt64LittleEndian(d.AsSpan(o), v);
+
+    private static string ReadName(byte[] virtualData, long namePtr)
+    {
+        int nameOff = V2O(namePtr);
+        int nameEnd = Array.IndexOf(virtualData, (byte)0, nameOff);
+        return Encoding.UTF8.GetString(virtualData, nameOff, nameEnd - nameOff);
+    }
+
+    private static (int[] offsets, int[] sizes) BuildMipInfo(int width, int height, BCFormat fmt, int mipCount)
+    {
+        int[] offsets = new int[mipCount];
+        int[] sizes = new int[mipCount];
+        int w = width, h = height, off = 0;
+        for (int m = 0; m < mipCount; m++)
+        {
+            int ms = Formats.MipDataSize(w, h, fmt);
+            offsets[m] = off;
+            sizes[m] = ms;
+            off += ms;
+            w = Math.Max(1, w / 2);
+            h = Math.Max(1, h / 2);
+        }
+        return (offsets, sizes);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // GTA V Legacy (RSC7 version 13)
+    // ═════════════════════════════════════════════════════════════════════
 
     private static int LargeMipDataSize(int w, int h, BCFormat fmt, int levels)
     {
@@ -160,32 +204,25 @@ public sealed class YtdFile
         return total;
     }
 
-    private byte[] Build()
+    private byte[] BuildGtaV()
     {
         var entries = _textures.OrderBy(t => Joaat(t.Name)).ToList();
         int n = entries.Count;
         if (n == 0)
-            throw new InvalidOperationException("Cannot create YTD with zero textures");
+            throw new InvalidOperationException("Cannot create ITD with zero textures");
 
-        // Phase 1: virtual data layout
         int dictSize = 0x40;
         int keysOffset = dictSize;
-        int keysSize = 4 * n;
+        int ptrsOffset = Align(keysOffset + 4 * n, 16);
+        int texturesOffset = Align(ptrsOffset + 8 * n, 16);
 
-        int ptrsOffset = Align(keysOffset + keysSize, 16);
-        int ptrsSize = 8 * n;
-
-        int texturesOffset = Align(ptrsOffset + ptrsSize, 16);
-        int texturesSize = GrcTextureSize * n;
-
-        int namesOffset = texturesOffset + texturesSize;
-        var nameBytesList = new List<byte[]>();
+        int cur = texturesOffset + GrcTextureSize * n;
         var nameOffsets = new List<int>();
-        int cur = namesOffset;
+        var nameBytesList = new List<byte[]>();
         foreach (var e in entries)
         {
-            byte[] encoded = Encoding.UTF8.GetBytes(e.Name + "\0");
             nameOffsets.Add(cur);
+            byte[] encoded = Encoding.UTF8.GetBytes(e.Name + "\0");
             nameBytesList.Add(encoded);
             cur += encoded.Length;
         }
@@ -193,7 +230,6 @@ public sealed class YtdFile
         int pagemapOffset = Align(cur, 16);
         int virtualSize = pagemapOffset + 0x10;
 
-        // Phase 2: physical data layout
         var physOffsets = new List<int>();
         int physCur = 0;
         foreach (var e in entries)
@@ -202,23 +238,18 @@ public sealed class YtdFile
             physCur += e.Data.Length;
         }
 
-        // Phase 3: build virtual buffer
         byte[] vbuf = new byte[virtualSize];
 
-        long keysVaddr = Resource.VirtualBase + keysOffset;
-        long ptrsVaddr = Resource.VirtualBase + ptrsOffset;
-        long pagemapVaddr = Resource.VirtualBase + pagemapOffset;
-
         W64(vbuf, 0x00, 0);
-        W64(vbuf, 0x08, pagemapVaddr);
+        W64(vbuf, 0x08, Resource.VirtualBase + pagemapOffset);
         W64(vbuf, 0x10, 0);
         W32(vbuf, 0x18, 1);
         W32(vbuf, 0x1C, 0);
-        W64(vbuf, 0x20, keysVaddr);
+        W64(vbuf, 0x20, Resource.VirtualBase + keysOffset);
         W16(vbuf, 0x28, (ushort)n);
         W16(vbuf, 0x2A, (ushort)n);
         W32(vbuf, 0x2C, 0);
-        W64(vbuf, 0x30, ptrsVaddr);
+        W64(vbuf, 0x30, Resource.VirtualBase + ptrsOffset);
         W16(vbuf, 0x38, (ushort)n);
         W16(vbuf, 0x3A, (ushort)n);
         W32(vbuf, 0x3C, 0);
@@ -236,13 +267,12 @@ public sealed class YtdFile
         {
             var e = entries[i];
             int off = texturesOffset + GrcTextureSize * i;
-            var fmt = e.Format;
 
-            uint formatVal = Formats.ToDx9(fmt);
-            int stride = Formats.RowPitch(e.Width, fmt);
+            uint formatVal = Formats.ToDx9(e.Format);
+            int stride = Formats.RowPitch(e.Width, e.Format);
             long nameVaddr = Resource.VirtualBase + nameOffsets[i];
             long dataPaddr = Resource.PhysicalBase + physOffsets[i];
-            int dataSizeLarge = LargeMipDataSize(e.Width, e.Height, fmt, e.MipCount);
+            int dataSizeLarge = LargeMipDataSize(e.Width, e.Height, e.Format, e.MipCount);
 
             W64(vbuf, off + 0x00, 0);
             W64(vbuf, off + 0x08, 0);
@@ -278,15 +308,11 @@ public sealed class YtdFile
         }
 
         for (int i = 0; i < nameBytesList.Count; i++)
-        {
-            byte[] nameData = nameBytesList[i];
-            Array.Copy(nameData, 0, vbuf, nameOffsets[i], nameData.Length);
-        }
+            Array.Copy(nameBytesList[i], 0, vbuf, nameOffsets[i], nameBytesList[i].Length);
 
         vbuf[pagemapOffset] = 1;
         vbuf[pagemapOffset + 1] = 1;
 
-        // Phase 4: physical data
         byte[] pbuf = new byte[physCur];
         for (int i = 0; i < entries.Count; i++)
             Array.Copy(entries[i].Data, 0, pbuf, physOffsets[i], entries[i].Data.Length);
@@ -294,42 +320,32 @@ public sealed class YtdFile
         return Resource.BuildRsc7(vbuf, pbuf);
     }
 
-    // ── Parser ───────────────────────────────────────────────────────────
-
-    private static YtdFile Parse(byte[] fileData)
+    private static ItdFile ParseGtaV(byte[] fileData)
     {
         var (virtualData, physicalData) = Resource.DecompressRsc7(fileData);
 
         int count = R16(virtualData, 0x28);
-        long keysPtr = R64(virtualData, 0x20);
-        long itemsPtr = R64(virtualData, 0x30);
-        int keysOff = V2O(keysPtr);
-        int itemsOff = V2O(itemsPtr);
+        int itemsOff = V2O(R64(virtualData, 0x30));
 
-        var ytd = new YtdFile();
+        var itd = new ItdFile(Game.GtaVLegacy);
 
         for (int i = 0; i < count; i++)
         {
-            long texPtr = R64(virtualData, itemsOff + 8 * i);
-            int texOff = V2O(texPtr);
+            int texOff = V2O(R64(virtualData, itemsOff + 8 * i));
 
-            long namePtr = R64(virtualData, texOff + 0x28);
+            string name = ReadName(virtualData, R64(virtualData, texOff + 0x28));
             int width = R16S(virtualData, texOff + 0x50);
             int height = R16S(virtualData, texOff + 0x52);
             uint formatVal = R32(virtualData, texOff + 0x58);
             int mipLevels = virtualData[texOff + 0x5D];
             long dataPtr = R64(virtualData, texOff + 0x70);
 
-            int nameOff = V2O(namePtr);
-            int nameEnd = Array.IndexOf(virtualData, (byte)0, nameOff);
-            string name = Encoding.UTF8.GetString(virtualData, nameOff, nameEnd - nameOff);
-
             BCFormat fmt;
             try { fmt = Formats.FromDx9(formatVal); }
             catch
             {
                 try { fmt = Formats.FromDxgi(formatVal); }
-                catch { throw new InvalidDataException($"Unsupported texture format in YTD: 0x{formatVal:X8}"); }
+                catch { throw new InvalidDataException($"Unsupported format: 0x{formatVal:X8}"); }
             }
 
             int physOff = P2O(dataPtr);
@@ -337,43 +353,78 @@ public sealed class YtdFile
             byte[] pixelData = new byte[dataSize];
             Array.Copy(physicalData, physOff, pixelData, 0, dataSize);
 
-            int[] offsets = new int[mipLevels];
-            int[] sizes = new int[mipLevels];
-            int w = width, h = height, off = 0;
-            for (int m = 0; m < mipLevels; m++)
-            {
-                int ms = Formats.MipDataSize(w, h, fmt);
-                offsets[m] = off;
-                sizes[m] = ms;
-                off += ms;
-                w = Math.Max(1, w / 2);
-                h = Math.Max(1, h / 2);
-            }
-
-            ytd.Add(Texture.FromRaw(pixelData, width, height, fmt, mipLevels, offsets, sizes, name));
+            var (offsets, sizes) = BuildMipInfo(width, height, fmt, mipLevels);
+            itd.Add(Texture.FromRaw(pixelData, width, height, fmt, mipLevels, offsets, sizes, name));
         }
 
-        return ytd;
+        return itd;
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
+    private static List<TextureInfo> InspectGtaV(byte[] fileData)
+    {
+        var (virtualData, _) = Resource.DecompressRsc7(fileData);
 
-    private static int V2O(long addr) => (int)(addr - Resource.VirtualBase);
-    private static int P2O(long addr) => (int)(addr - Resource.PhysicalBase);
+        int count = R16(virtualData, 0x28);
+        int itemsOff = V2O(R64(virtualData, 0x30));
 
-    private static ushort R16(byte[] d, int o) => BinaryPrimitives.ReadUInt16LittleEndian(d.AsSpan(o));
-    private static short R16S(byte[] d, int o) => BinaryPrimitives.ReadInt16LittleEndian(d.AsSpan(o));
-    private static uint R32(byte[] d, int o) => BinaryPrimitives.ReadUInt32LittleEndian(d.AsSpan(o));
-    private static long R64(byte[] d, int o) => (long)BinaryPrimitives.ReadUInt64LittleEndian(d.AsSpan(o));
+        var result = new List<TextureInfo>();
+        for (int i = 0; i < count; i++)
+        {
+            int texOff = V2O(R64(virtualData, itemsOff + 8 * i));
 
-    private static void W16(byte[] d, int o, ushort v) => BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(o), v);
-    private static void W32(byte[] d, int o, uint v) => BinaryPrimitives.WriteUInt32LittleEndian(d.AsSpan(o), v);
-    private static void W64(byte[] d, int o, long v) => BinaryPrimitives.WriteInt64LittleEndian(d.AsSpan(o), v);
+            string name = ReadName(virtualData, R64(virtualData, texOff + 0x28));
+            int width = R16S(virtualData, texOff + 0x50);
+            int height = R16S(virtualData, texOff + 0x52);
+            uint formatVal = R32(virtualData, texOff + 0x58);
+            int mipLevels = virtualData[texOff + 0x5D];
+
+            BCFormat? fmt = null;
+            try { fmt = Formats.FromDx9(formatVal); } catch { }
+            if (fmt == null) try { fmt = Formats.FromDxgi(formatVal); } catch { }
+
+            string formatName = fmt.HasValue ? fmt.Value.ToString() : $"Unknown(0x{formatVal:X8})";
+            int dataSize = fmt.HasValue
+                ? Formats.TotalMipDataSize(width, height, fmt.Value, mipLevels)
+                : 0;
+
+            result.Add(new TextureInfo(name, width, height,
+                fmt ?? BCFormat.BC7, mipLevels, dataSize));
+        }
+
+        return result;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // RDR2 (RSC8) — placeholder, implemented in next commit
+    // ═════════════════════════════════════════════════════════════════════
+
+    private byte[] BuildRdr2() =>
+        throw new NotImplementedException("RDR2 build not yet implemented");
+
+    private static ItdFile ParseRdr2(byte[] fileData) =>
+        throw new NotImplementedException("RDR2 parse not yet implemented");
+
+    private static List<TextureInfo> InspectRdr2(byte[] fileData) =>
+        throw new NotImplementedException("RDR2 inspect not yet implemented");
+
+    // ═════════════════════════════════════════════════════════════════════
+    // GTA V Enhanced — placeholder, implemented in later commit
+    // ═════════════════════════════════════════════════════════════════════
+
+    private byte[] BuildEnhanced() =>
+        throw new NotImplementedException("Enhanced build not yet implemented");
+
+    private static ItdFile ParseEnhanced(byte[] fileData) =>
+        throw new NotImplementedException("Enhanced parse not yet implemented");
+
+    private static List<TextureInfo> InspectEnhanced(byte[] fileData) =>
+        throw new NotImplementedException("Enhanced inspect not yet implemented");
 
     // ── High-level convenience methods ───────────────────────────────────
 
-    /// <summary>Create a YTD from all images in a folder.</summary>
+    /// <summary>Create an ITD from all images in a folder.</summary>
     public static string CreateFromFolder(string folder, string? output = null,
+        Game game = Game.GtaVLegacy,
         BCFormat format = BCFormat.BC7, float quality = 0.7f,
         bool generateMipmaps = true, int minMipSize = 4,
         MipFilter mipFilter = MipFilter.Mitchell,
@@ -394,7 +445,7 @@ public sealed class YtdFile
         if (files.Count == 0)
             throw new FileNotFoundException($"No image files found in {folder}");
 
-        var ytd = new YtdFile();
+        var itd = new ItdFile(game);
         int total = files.Count;
         for (int i = 0; i < total; i++)
         {
@@ -407,10 +458,10 @@ public sealed class YtdFile
                     generateMipmaps: generateMipmaps, minMipSize: minMipSize,
                     mipFilter: mipFilter, name: name);
 
-            ytd.Add(tex);
+            itd.Add(tex);
         }
 
-        ytd.Save(output);
+        itd.Save(output);
         return output;
     }
 
@@ -450,15 +501,15 @@ public sealed class YtdFile
         return outputDir;
     }
 
-    /// <summary>Extract all textures from a YTD as DDS files.</summary>
-    public static string ExtractYtd(string ytdPath, string? outputDir = null)
+    /// <summary>Extract all textures from an ITD as DDS files.</summary>
+    public static string Extract(string path, string? outputDir = null)
     {
-        outputDir ??= Path.Combine(Path.GetDirectoryName(ytdPath)!,
-                                    Path.GetFileNameWithoutExtension(ytdPath));
+        outputDir ??= Path.Combine(Path.GetDirectoryName(path)!,
+                                    Path.GetFileNameWithoutExtension(path));
         Directory.CreateDirectory(outputDir);
 
-        var ytd = YtdFile.Load(ytdPath);
-        foreach (var tex in ytd.Textures)
+        var itd = ItdFile.Load(path);
+        foreach (var tex in itd.Textures)
             tex.SaveDds(Path.Combine(outputDir, tex.Name + ".dds"));
 
         return outputDir;

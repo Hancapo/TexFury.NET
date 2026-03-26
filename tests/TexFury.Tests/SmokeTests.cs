@@ -79,7 +79,7 @@ public class SmokeTests
         var tex2 = Texture.FromPixels(MakeGradient(128, 128), 128, 128,
             format: BCFormat.A8R8G8B8, name: "gradient_uncompressed");
 
-        var ytd = new YtdFile();
+        var ytd = new ItdFile();
         ytd.Add(tex1);
         ytd.Add(tex2);
 
@@ -89,7 +89,7 @@ public class SmokeTests
             ytd.Save(path);
             Assert.True(File.Exists(path));
 
-            var loaded = YtdFile.Load(path);
+            var loaded = ItdFile.Load(path);
             Assert.Equal(2, loaded.Count);
 
             var names = loaded.Textures.Select(t => t.Name).OrderBy(n => n).ToList();
