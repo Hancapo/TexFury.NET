@@ -395,17 +395,231 @@ public sealed class ItdFile
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    // RDR2 (RSC8) — placeholder, implemented in next commit
+    // RDR2 (RSC8)
     // ═════════════════════════════════════════════════════════════════════
 
-    private byte[] BuildRdr2() =>
-        throw new NotImplementedException("RDR2 build not yet implemented");
+    private const int Rdr2TexSize = 0xB0; // 176 bytes
+    private const long Rdr2DictVft = 0x00000001409100B0;
+    private const long Rdr2TexVft = 0x00000001409100B0;
+    private const long Rdr2SrvVft = 0x0000000140910080;
+    private const uint Rdr2Flags = 0x18008002;
+    private const byte Rdr2TileStandard = 13;
+    private const byte Rdr2Dim2D = 1;
+    private const long Rdr2SrvDim2D = 0x0401;
 
-    private static ItdFile ParseRdr2(byte[] fileData) =>
-        throw new NotImplementedException("RDR2 parse not yet implemented");
+    private byte[] BuildRdr2()
+    {
+        var entries = _textures.OrderBy(t => Joaat(t.Name)).ToList();
+        int n = entries.Count;
+        if (n == 0)
+            throw new InvalidOperationException("Cannot create ITD with zero textures");
 
-    private static List<TextureInfo> InspectRdr2(byte[] fileData) =>
-        throw new NotImplementedException("RDR2 inspect not yet implemented");
+        // Virtual layout
+        int dictSize = 64;
+        int blockmapOff = Align(dictSize, 16);
+        int blockmapSize = 16 + 2 * 8;
+
+        int hashOff = Align(blockmapOff + blockmapSize, 16);
+        int ptrOff = Align(hashOff + n * 4, 16);
+        int texOffBase = Align(ptrOff + n * 8, 16);
+
+        int cur = Align(texOffBase + Rdr2TexSize * n, 16);
+        var nameOffsets = new List<int>();
+        var nameBytesList = new List<byte[]>();
+        foreach (var e in entries)
+        {
+            nameOffsets.Add(cur);
+            byte[] encoded = Encoding.UTF8.GetBytes(e.Name + "\0");
+            nameBytesList.Add(encoded);
+            cur = Align(cur + encoded.Length, 16);
+        }
+        int virtualSize = cur;
+
+        // Physical layout (padded to BlockCount * BlockStride)
+        var physOffsets = new List<int>();
+        var physDataList = new List<byte[]>();
+        int physCur = 0;
+        foreach (var e in entries)
+        {
+            physOffsets.Add(physCur);
+            int bc = Formats.BlockCount(e.Format, e.Width, e.Height, 1, e.MipCount);
+            int target = bc * Formats.BlockStride(e.Format);
+            byte[] data = e.Data;
+            if (data.Length < target)
+            {
+                byte[] padded = new byte[target];
+                Array.Copy(data, padded, data.Length);
+                data = padded;
+            }
+            physDataList.Add(data);
+            physCur = Align(physCur + data.Length, 16);
+        }
+        int physicalSize = physCur;
+
+        // Page sizes for BlockMap
+        int vPage = Align(virtualSize, virtualSize > 0x8000 ? 0x10000 : 16);
+        int pPage = Align(physicalSize, physicalSize > 0x8000 ? 0x10000 : 16);
+
+        // Build virtual buffer
+        byte[] vbuf = new byte[virtualSize];
+
+        // Dictionary root (64 bytes)
+        W64(vbuf, 0x00, Rdr2DictVft);
+        W64(vbuf, 0x08, Resource.VirtualBase + blockmapOff);
+        W64(vbuf, 0x10, 0);
+        W64(vbuf, 0x18, 1);
+        W64(vbuf, 0x20, Resource.VirtualBase + hashOff);
+        W16(vbuf, 0x28, (ushort)n);
+        W16(vbuf, 0x2A, (ushort)n);
+        W32(vbuf, 0x2C, 0);
+        W64(vbuf, 0x30, Resource.VirtualBase + ptrOff);
+        W16(vbuf, 0x38, (ushort)n);
+        W16(vbuf, 0x3A, (ushort)n);
+        W32(vbuf, 0x3C, 0);
+
+        // BlockMap
+        W64(vbuf, blockmapOff, 0);
+        vbuf[blockmapOff + 8] = 1; // virtual page count
+        vbuf[blockmapOff + 9] = 1; // physical page count
+        W16(vbuf, blockmapOff + 10, 0);
+        W32(vbuf, blockmapOff + 12, 0);
+        W64(vbuf, blockmapOff + 16, vPage);
+        W64(vbuf, blockmapOff + 24, pPage);
+
+        // Hash array
+        for (int i = 0; i < n; i++)
+            W32(vbuf, hashOff + 4 * i, Joaat(entries[i].Name));
+
+        // Pointer array
+        for (int i = 0; i < n; i++)
+            W64(vbuf, ptrOff + 8 * i, Resource.VirtualBase + texOffBase + Rdr2TexSize * i);
+
+        // Texture blocks (176 bytes each)
+        for (int i = 0; i < n; i++)
+        {
+            var e = entries[i];
+            int off = texOffBase + Rdr2TexSize * i;
+            int bc = Formats.BlockCount(e.Format, e.Width, e.Height, 1, e.MipCount);
+            int bs = Formats.BlockStride(e.Format);
+
+            // TextureBase (0x00–0x4F)
+            W64(vbuf, off + 0x00, Rdr2TexVft);
+            W32(vbuf, off + 0x08, (uint)bc);
+            W32(vbuf, off + 0x0C, (uint)bs);
+            W32(vbuf, off + 0x10, Rdr2Flags);
+            W32(vbuf, off + 0x14, 0);
+            W16(vbuf, off + 0x18, (ushort)e.Width);
+            W16(vbuf, off + 0x1A, (ushort)e.Height);
+            W16(vbuf, off + 0x1C, 1); // depth
+            vbuf[off + 0x1E] = Rdr2Dim2D;
+            vbuf[off + 0x1F] = Formats.ToRsc8(e.Format);
+            vbuf[off + 0x20] = Rdr2TileStandard;
+            vbuf[off + 0x21] = 0; // AntiAliasType
+            vbuf[off + 0x22] = (byte)e.MipCount;
+            vbuf[off + 0x23] = 0;
+            vbuf[off + 0x24] = 0;
+            vbuf[off + 0x25] = 0;
+            W16(vbuf, off + 0x26, 1); // UsageCount
+            W64(vbuf, off + 0x28, Resource.VirtualBase + nameOffsets[i]);
+            W64(vbuf, off + 0x30, Resource.VirtualBase + off + 0x68); // SRV ptr
+            W64(vbuf, off + 0x38, Resource.PhysicalBase + physOffsets[i]);
+            W32(vbuf, off + 0x40, 0);
+            W32(vbuf, off + 0x44, 0);
+            W64(vbuf, off + 0x48, 0);
+
+            // Extended (0x50–0x67)
+            W64(vbuf, off + 0x50, 0);
+            W64(vbuf, off + 0x58, 0);
+            W64(vbuf, off + 0x60, 0);
+
+            // Embedded SRV (0x68–0xAF)
+            W64(vbuf, off + 0x68, Rdr2SrvVft);
+            W64(vbuf, off + 0x70, 0);
+            W64(vbuf, off + 0x78, Rdr2SrvDim2D);
+            W64(vbuf, off + 0x80, 5);
+            W64(vbuf, off + 0x88, 0);
+            W64(vbuf, off + 0x90, 0);
+            W64(vbuf, off + 0x98, 0);
+            W64(vbuf, off + 0xA0, 0);
+            W64(vbuf, off + 0xA8, 0);
+        }
+
+        // Name strings
+        for (int i = 0; i < nameBytesList.Count; i++)
+            Array.Copy(nameBytesList[i], 0, vbuf, nameOffsets[i], nameBytesList[i].Length);
+
+        // Physical buffer
+        byte[] pbuf = new byte[physicalSize];
+        for (int i = 0; i < physDataList.Count; i++)
+            Array.Copy(physDataList[i], 0, pbuf, physOffsets[i], physDataList[i].Length);
+
+        return Rsc8.BuildRsc8(vbuf, pbuf);
+    }
+
+    private static ItdFile ParseRdr2(byte[] fileData)
+    {
+        var (virtualData, physicalData) = Rsc8.DecompressRsc8(fileData);
+
+        int count = R16(virtualData, 0x28);
+        int itemsOff = V2O(R64(virtualData, 0x30));
+
+        var itd = new ItdFile(Game.Rdr2);
+
+        for (int i = 0; i < count; i++)
+        {
+            int texOff = V2O(R64(virtualData, itemsOff + 8 * i));
+
+            string name = ReadName(virtualData, R64(virtualData, texOff + 0x28));
+            int width = R16(virtualData, texOff + 0x18);
+            int height = R16(virtualData, texOff + 0x1A);
+            byte formatByte = virtualData[texOff + 0x1F];
+            int mipLevels = virtualData[texOff + 0x22];
+            long dataPtr = R64(virtualData, texOff + 0x38);
+
+            BCFormat fmt = Formats.FromRsc8(formatByte);
+            int physOff = P2O(dataPtr);
+            int dataSize = Formats.TotalMipDataSize(width, height, fmt, mipLevels);
+            byte[] pixelData = new byte[dataSize];
+            Array.Copy(physicalData, physOff, pixelData, 0, dataSize);
+
+            var (offsets, sizes) = BuildMipInfo(width, height, fmt, mipLevels);
+            itd.Add(Texture.FromRaw(pixelData, width, height, fmt, mipLevels, offsets, sizes, name));
+        }
+
+        return itd;
+    }
+
+    private static List<TextureInfo> InspectRdr2(byte[] fileData)
+    {
+        var (virtualData, _) = Rsc8.DecompressRsc8(fileData);
+
+        int count = R16(virtualData, 0x28);
+        int itemsOff = V2O(R64(virtualData, 0x30));
+
+        var result = new List<TextureInfo>();
+        for (int i = 0; i < count; i++)
+        {
+            int texOff = V2O(R64(virtualData, itemsOff + 8 * i));
+
+            string name = ReadName(virtualData, R64(virtualData, texOff + 0x28));
+            int width = R16(virtualData, texOff + 0x18);
+            int height = R16(virtualData, texOff + 0x1A);
+            byte formatByte = virtualData[texOff + 0x1F];
+            int mipLevels = virtualData[texOff + 0x22];
+
+            BCFormat? fmt = null;
+            try { fmt = Formats.FromRsc8(formatByte); } catch { }
+
+            string formatName = fmt.HasValue ? fmt.Value.ToString() : $"Unknown(0x{formatByte:X2})";
+            int dataSize = fmt.HasValue
+                ? Formats.TotalMipDataSize(width, height, fmt.Value, mipLevels) : 0;
+
+            result.Add(new TextureInfo(name, width, height,
+                fmt ?? BCFormat.BC7, mipLevels, dataSize));
+        }
+
+        return result;
+    }
 
     // ═════════════════════════════════════════════════════════════════════
     // GTA V Enhanced — placeholder, implemented in later commit
