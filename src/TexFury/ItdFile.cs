@@ -622,17 +622,220 @@ public sealed class ItdFile
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    // GTA V Enhanced — placeholder, implemented in later commit
+    // GTA V Enhanced / gen9 (RSC7 version 5)
     // ═════════════════════════════════════════════════════════════════════
 
-    private byte[] BuildEnhanced() =>
-        throw new NotImplementedException("Enhanced build not yet implemented");
+    private const int EnhancedTexSize = 0x80; // 128 bytes
+    private const uint EnhancedFlags = 0x00260208;
+    private const byte EnhancedTileAuto = 255;
+    private const byte EnhancedUnk23h = 0x28;
+    private const uint EnhancedUnk44h = 2;
+    private const byte EnhancedDim2D = 1;
+    private const long EnhancedSrvVft = 0x00000001406B77D8;
+    private const ushort EnhancedSrvDim2D = 0x41;
+    private const int Rsc7VersionGen9 = 5;
 
-    private static ItdFile ParseEnhanced(byte[] fileData) =>
-        throw new NotImplementedException("Enhanced parse not yet implemented");
+    private byte[] BuildEnhanced()
+    {
+        var entries = _textures.OrderBy(t => Joaat(t.Name)).ToList();
+        int n = entries.Count;
+        if (n == 0)
+            throw new InvalidOperationException("Cannot create ITD with zero textures");
 
-    private static List<TextureInfo> InspectEnhanced(byte[] fileData) =>
-        throw new NotImplementedException("Enhanced inspect not yet implemented");
+        // Virtual layout (same dictionary header as legacy)
+        int dictSize = 0x40;
+        int keysOffset = dictSize;
+        int ptrsOffset = Align(keysOffset + 4 * n, 16);
+        int texturesOffset = Align(ptrsOffset + 8 * n, 16);
+
+        int cur = texturesOffset + EnhancedTexSize * n;
+        var nameOffsets = new List<int>();
+        var nameBytesList = new List<byte[]>();
+        foreach (var e in entries)
+        {
+            nameOffsets.Add(cur);
+            byte[] encoded = Encoding.UTF8.GetBytes(e.Name + "\0");
+            nameBytesList.Add(encoded);
+            cur += encoded.Length;
+        }
+
+        int pagemapOffset = Align(cur, 16);
+        int virtualSize = pagemapOffset + 0x10;
+
+        // Physical layout — gen9 uses align=1 (no block padding)
+        var physOffsets = new List<int>();
+        var physDataList = new List<byte[]>();
+        int physCur = 0;
+        foreach (var e in entries)
+        {
+            physOffsets.Add(physCur);
+            int bc = Formats.BlockCount(e.Format, e.Width, e.Height, 1, e.MipCount, align: 1);
+            int target = bc * Formats.BlockStride(e.Format);
+            byte[] data = e.Data;
+            if (data.Length < target)
+            {
+                byte[] padded = new byte[target];
+                Array.Copy(data, padded, data.Length);
+                data = padded;
+            }
+            physDataList.Add(data);
+            physCur = Align(physCur + data.Length, 16);
+        }
+        int physicalSize = physCur;
+
+        // Build virtual buffer
+        byte[] vbuf = new byte[virtualSize];
+
+        // Dictionary root (64 bytes)
+        W64(vbuf, 0x00, 0); // VFT = 0
+        W64(vbuf, 0x08, Resource.VirtualBase + pagemapOffset);
+        W64(vbuf, 0x10, 0);
+        W32(vbuf, 0x18, 1);
+        W32(vbuf, 0x1C, 0);
+        W64(vbuf, 0x20, Resource.VirtualBase + keysOffset);
+        W16(vbuf, 0x28, (ushort)n);
+        W16(vbuf, 0x2A, (ushort)n);
+        W32(vbuf, 0x2C, 0);
+        W64(vbuf, 0x30, Resource.VirtualBase + ptrsOffset);
+        W16(vbuf, 0x38, (ushort)n);
+        W16(vbuf, 0x3A, (ushort)n);
+        W32(vbuf, 0x3C, 0);
+
+        // Hash array
+        for (int i = 0; i < n; i++)
+            W32(vbuf, keysOffset + 4 * i, Joaat(entries[i].Name));
+
+        // Pointer array
+        for (int i = 0; i < n; i++)
+            W64(vbuf, ptrsOffset + 8 * i, Resource.VirtualBase + texturesOffset + EnhancedTexSize * i);
+
+        // Texture blocks (128 bytes each)
+        for (int i = 0; i < n; i++)
+        {
+            var e = entries[i];
+            int off = texturesOffset + EnhancedTexSize * i;
+            int bc = Formats.BlockCount(e.Format, e.Width, e.Height, 1, e.MipCount, align: 1);
+            int bs = Formats.BlockStride(e.Format);
+
+            // TextureBase (0x00–0x4F)
+            W32(vbuf, off + 0x00, 0);   // VFT = 0
+            W32(vbuf, off + 0x04, 1);   // Unknown_4h = 1
+            W32(vbuf, off + 0x08, (uint)bc);
+            W32(vbuf, off + 0x0C, (uint)bs);
+            W32(vbuf, off + 0x10, EnhancedFlags);
+            W32(vbuf, off + 0x14, 0);
+            W16(vbuf, off + 0x18, (ushort)e.Width);
+            W16(vbuf, off + 0x1A, (ushort)e.Height);
+            W16(vbuf, off + 0x1C, 1); // depth
+            vbuf[off + 0x1E] = EnhancedDim2D;
+            vbuf[off + 0x1F] = Formats.ToRsc8(e.Format);
+            vbuf[off + 0x20] = EnhancedTileAuto;
+            vbuf[off + 0x21] = 0; // AntiAliasType
+            vbuf[off + 0x22] = (byte)e.MipCount;
+            vbuf[off + 0x23] = EnhancedUnk23h;
+            vbuf[off + 0x24] = 0;
+            vbuf[off + 0x25] = 0;
+            W16(vbuf, off + 0x26, 1); // UsageCount
+            W64(vbuf, off + 0x28, Resource.VirtualBase + nameOffsets[i]);
+            W64(vbuf, off + 0x30, Resource.VirtualBase + off + 0x58); // SRV ptr
+            W64(vbuf, off + 0x38, Resource.PhysicalBase + physOffsets[i]);
+            W32(vbuf, off + 0x40, 0);
+            W32(vbuf, off + 0x44, EnhancedUnk44h);
+            W64(vbuf, off + 0x48, 0);
+
+            // Texture extra (0x50–0x57)
+            W64(vbuf, off + 0x50, 0);
+
+            // Embedded ShaderResourceView (32 bytes at 0x58)
+            W64(vbuf, off + 0x58, EnhancedSrvVft);
+            W64(vbuf, off + 0x60, 0);
+            W16(vbuf, off + 0x68, EnhancedSrvDim2D);
+            W16(vbuf, off + 0x6A, 0xFFFF);
+            W32(vbuf, off + 0x6C, 0xFFFFFFFF);
+            W64(vbuf, off + 0x70, 0);
+            W64(vbuf, off + 0x78, 0);
+        }
+
+        // Name strings
+        for (int i = 0; i < nameBytesList.Count; i++)
+            Array.Copy(nameBytesList[i], 0, vbuf, nameOffsets[i], nameBytesList[i].Length);
+
+        // Pagemap
+        vbuf[pagemapOffset] = 1;
+        vbuf[pagemapOffset + 1] = 1;
+
+        // Physical buffer
+        byte[] pbuf = new byte[physicalSize];
+        for (int i = 0; i < physDataList.Count; i++)
+            Array.Copy(physDataList[i], 0, pbuf, physOffsets[i], physDataList[i].Length);
+
+        return Resource.BuildRsc7(vbuf, pbuf, version: Rsc7VersionGen9);
+    }
+
+    private static ItdFile ParseEnhanced(byte[] fileData)
+    {
+        var (virtualData, physicalData) = Resource.DecompressRsc7(fileData);
+
+        int count = R16(virtualData, 0x28);
+        int itemsOff = V2O(R64(virtualData, 0x30));
+
+        var itd = new ItdFile(Game.GtaVEnhanced);
+
+        for (int i = 0; i < count; i++)
+        {
+            int texOff = V2O(R64(virtualData, itemsOff + 8 * i));
+
+            string name = ReadName(virtualData, R64(virtualData, texOff + 0x28));
+            int width = R16(virtualData, texOff + 0x18);
+            int height = R16(virtualData, texOff + 0x1A);
+            byte formatByte = virtualData[texOff + 0x1F];
+            int mipLevels = virtualData[texOff + 0x22];
+            long dataPtr = R64(virtualData, texOff + 0x38);
+
+            BCFormat fmt = Formats.FromRsc8(formatByte);
+            int physOff = P2O(dataPtr);
+            int dataSize = Formats.TotalMipDataSize(width, height, fmt, mipLevels);
+            byte[] pixelData = new byte[dataSize];
+            Array.Copy(physicalData, physOff, pixelData, 0, dataSize);
+
+            var (offsets, sizes) = BuildMipInfo(width, height, fmt, mipLevels);
+            itd.Add(Texture.FromRaw(pixelData, width, height, fmt, mipLevels, offsets, sizes, name));
+        }
+
+        return itd;
+    }
+
+    private static List<TextureInfo> InspectEnhanced(byte[] fileData)
+    {
+        var (virtualData, _) = Resource.DecompressRsc7(fileData);
+
+        int count = R16(virtualData, 0x28);
+        int itemsOff = V2O(R64(virtualData, 0x30));
+
+        var result = new List<TextureInfo>();
+        for (int i = 0; i < count; i++)
+        {
+            int texOff = V2O(R64(virtualData, itemsOff + 8 * i));
+
+            string name = ReadName(virtualData, R64(virtualData, texOff + 0x28));
+            int width = R16(virtualData, texOff + 0x18);
+            int height = R16(virtualData, texOff + 0x1A);
+            byte formatByte = virtualData[texOff + 0x1F];
+            int mipLevels = virtualData[texOff + 0x22];
+
+            BCFormat? fmt = null;
+            try { fmt = Formats.FromRsc8(formatByte); } catch { }
+
+            string formatName = fmt.HasValue ? fmt.Value.ToString() : $"Unknown(0x{formatByte:X2})";
+            int dataSize = fmt.HasValue
+                ? Formats.TotalMipDataSize(width, height, fmt.Value, mipLevels) : 0;
+
+            result.Add(new TextureInfo(name, width, height,
+                fmt ?? BCFormat.BC7, mipLevels, dataSize));
+        }
+
+        return result;
+    }
 
     // ── High-level convenience methods ───────────────────────────────────
 
