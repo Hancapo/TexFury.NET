@@ -3,6 +3,9 @@ namespace TexFury;
 /// <summary>Target game for texture dictionary operations.</summary>
 public enum Game
 {
+    /// <summary>GTA IV (RSC5 / .wtd).</summary>
+    GtaIV = -1,
+
     /// <summary>GTA V original / Legacy edition (RSC7 version 13).</summary>
     GtaVLegacy = 0,
 
@@ -11,4 +14,13 @@ public enum Game
 
     /// <summary>Red Dead Redemption 2 (RSC8).</summary>
     Rdr2 = 2,
+
+    /// <summary>Alias for GTA V original / Legacy edition.</summary>
+    GtaV = GtaVLegacy,
+
+    /// <summary>Alias for GTA V Enhanced / gen9.</summary>
+    GtaVGen9 = GtaVEnhanced,
+
+    /// <summary>Alias for GTA IV.</summary>
+    Gta4 = GtaIV,
 }

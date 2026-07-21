@@ -44,6 +44,9 @@ internal static partial class NativeMethods
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern int tf_next_power_of_two(int value);
 
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int tf_nearest_power_of_two(int value);
+
     // Image transforms
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr tf_resize(IntPtr img, int width, int height, int filter);
@@ -55,6 +58,11 @@ internal static partial class NativeMethods
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr tf_compress(IntPtr img, int format, int generateMipmaps,
                                             int minMipDim, float quality, int mipFilter);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr tf_create_compressed(IntPtr data, nuint dataSize,
+        int width, int height, int format, int mipCount,
+        IntPtr mipOffsets, IntPtr mipSizes);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern void tf_free_compressed(IntPtr compressed);
@@ -93,6 +101,9 @@ internal static partial class NativeMethods
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern IntPtr tf_load_dds([MarshalAs(UnmanagedType.LPWStr)] string path);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr tf_load_dds_memory(IntPtr data, nuint size);
 
     // Decompression
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

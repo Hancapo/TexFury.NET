@@ -23,8 +23,10 @@ internal static class DdsBuilder
     public static byte[] Build(int width, int height, BCFormat fmt,
                                int mipCount, int[] mipSizes, byte[] pixelData)
     {
-        bool uncompressed = !Formats.IsBlockCompressed(fmt);
-        bool useDx10 = !uncompressed && fmt is BCFormat.BC4 or BCFormat.BC5 or BCFormat.BC7;
+        bool compressed = Formats.IsBlockCompressed(fmt);
+        uint legacyFourCc = Formats.ToFourCC(fmt);
+        bool legacyUncompressed = fmt == BCFormat.A8R8G8B8;
+        bool useDx10 = legacyFourCc == 0 && !legacyUncompressed;
 
         int headerSize = 4 + 124 + (useDx10 ? 20 : 0);
         byte[] result = new byte[headerSize + pixelData.Length];
@@ -38,17 +40,17 @@ internal static class DdsBuilder
         BinaryPrimitives.WriteUInt32LittleEndian(hdr, 124); // size
 
         uint flags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT;
-        flags |= uncompressed ? DDSD_PITCH : DDSD_LINEARSIZE;
+        flags |= compressed ? DDSD_LINEARSIZE : DDSD_PITCH;
         if (mipCount > 1) flags |= DDSD_MIPMAPCOUNT;
         BinaryPrimitives.WriteUInt32LittleEndian(hdr[4..], flags);
 
         BinaryPrimitives.WriteUInt32LittleEndian(hdr[8..], (uint)height);
         BinaryPrimitives.WriteUInt32LittleEndian(hdr[12..], (uint)width);
 
-        if (uncompressed)
-            BinaryPrimitives.WriteUInt32LittleEndian(hdr[16..], (uint)(width * 4)); // pitch
-        else
+        if (compressed)
             BinaryPrimitives.WriteUInt32LittleEndian(hdr[16..], mipSizes.Length > 0 ? (uint)mipSizes[0] : 0);
+        else
+            BinaryPrimitives.WriteUInt32LittleEndian(hdr[16..], (uint)Formats.RowPitch(width, fmt));
 
         BinaryPrimitives.WriteUInt32LittleEndian(hdr[20..], 1); // depth
         BinaryPrimitives.WriteUInt32LittleEndian(hdr[24..], (uint)mipCount);
@@ -57,7 +59,7 @@ internal static class DdsBuilder
         // Pixel format at header offset 72
         BinaryPrimitives.WriteUInt32LittleEndian(hdr[72..], 32); // pf.size
 
-        if (uncompressed)
+        if (legacyUncompressed)
         {
             BinaryPrimitives.WriteUInt32LittleEndian(hdr[76..], DDPF_RGB | DDPF_ALPHAPIXELS);
             BinaryPrimitives.WriteUInt32LittleEndian(hdr[84..], 32);          // rgbBitCount
@@ -66,15 +68,15 @@ internal static class DdsBuilder
             BinaryPrimitives.WriteUInt32LittleEndian(hdr[96..], 0x000000FF);  // bBitMask
             BinaryPrimitives.WriteUInt32LittleEndian(hdr[100..], 0xFF000000); // aBitMask
         }
+        else if (legacyFourCc != 0)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(hdr[76..], DDPF_FOURCC);
+            BinaryPrimitives.WriteUInt32LittleEndian(hdr[80..], legacyFourCc);
+        }
         else
         {
             BinaryPrimitives.WriteUInt32LittleEndian(hdr[76..], DDPF_FOURCC);
-            if (useDx10)
-                BinaryPrimitives.WriteUInt32LittleEndian(hdr[80..], Formats.FourCC_DX10);
-            else if (fmt == BCFormat.BC1)
-                BinaryPrimitives.WriteUInt32LittleEndian(hdr[80..], Formats.FourCC_DXT1);
-            else
-                BinaryPrimitives.WriteUInt32LittleEndian(hdr[80..], Formats.FourCC_DXT5);
+            BinaryPrimitives.WriteUInt32LittleEndian(hdr[80..], Formats.FourCC_DX10);
         }
 
         uint caps = DDSCAPS_TEXTURE;

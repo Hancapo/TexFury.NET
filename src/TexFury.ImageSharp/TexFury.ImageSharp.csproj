@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>TexFury</RootNamespace>
+    <AssemblyName>TexFury.ImageSharp</AssemblyName>
+    <Version>1.6.0</Version>
+    <Authors>Hancapo</Authors>
+    <Description>ImageSharp integration for TexFury</Description>
+    <PackageId>TexFury.ImageSharp</PackageId>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>texfury;imagesharp;dds;texture;bc7;compression</PackageTags>
+    <RepositoryUrl>https://github.com/Hancapo/TexFury.NET</RepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TexFury\TexFury.csproj" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+  </ItemGroup>
+
+</Project>

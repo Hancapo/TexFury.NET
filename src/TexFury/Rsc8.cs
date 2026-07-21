@@ -13,7 +13,8 @@ internal static class Rsc8
         (size + alignment - 1) & ~(alignment - 1);
 
     public static byte[] BuildRsc8(byte[] virtualData, byte[] physicalData,
-                                    int version = Rsc8VersionYtd)
+                                    int version = Rsc8VersionYtd,
+                                    RscCompression compression = RscCompression.Oodle)
     {
         int vSize = virtualData.Length;
         int pSize = physicalData.Length;
@@ -28,11 +29,22 @@ internal static class Rsc8
         Array.Copy(virtualData, 0, padded, 0, vSize);
         Array.Copy(physicalData, 0, padded, vAligned, pSize);
 
-        byte[] compressed = Resource.DeflateCompress(padded);
+        byte[] compressed;
+        RscCompression compressorId;
+        if (compression == RscCompression.Oodle && Oodle.IsAvailable)
+        {
+            compressed = Oodle.Compress(padded);
+            compressorId = RscCompression.Oodle;
+        }
+        else
+        {
+            compressed = Resource.DeflateCompress(padded);
+            compressorId = RscCompression.Deflate;
+        }
 
         byte[] header = new byte[16];
         BinaryPrimitives.WriteUInt32LittleEndian(header, Rsc8Magic);
-        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(4), (uint)(version & 0xFF));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(4), EncodeVersion(version, compressorId));
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(8), vFlags);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(12), pFlags);
 
@@ -51,13 +63,17 @@ internal static class Rsc8
         if (magic != Rsc8Magic)
             throw new InvalidDataException($"Bad RSC8 magic: 0x{magic:X8}");
 
+        uint versionField = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(4));
         uint vFlags = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(8));
         uint pFlags = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(12));
 
         int vSize = (int)(vFlags & 0xFFFFFFF0);
         int pSize = (int)(pFlags & 0xFFFFFFF0);
 
-        byte[] raw = Resource.DeflateDecompress(data.AsSpan(16).ToArray(), vSize + pSize);
+        byte[] payload = data.AsSpan(16).ToArray();
+        byte[] raw = ParseCompressorId(versionField) == RscCompression.Oodle
+            ? Oodle.Decompress(payload, vSize + pSize)
+            : Resource.DeflateDecompress(payload, vSize + pSize);
 
         byte[] virt = new byte[vSize];
         byte[] phys = new byte[pSize];
@@ -65,4 +81,10 @@ internal static class Rsc8
         Array.Copy(raw, vSize, phys, 0, pSize);
         return (virt, phys);
     }
+
+    private static RscCompression ParseCompressorId(uint versionField) =>
+        (RscCompression)(((versionField >> 8) & 0x1F) + 1);
+
+    private static uint EncodeVersion(int version, RscCompression compressor) =>
+        (uint)(version & 0xFF) | (uint)((((int)compressor - 1) & 0x1F) << 8);
 }

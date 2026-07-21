@@ -43,15 +43,22 @@ public sealed class Texture
 
     /// <summary>True if the compression format supports an alpha channel.</summary>
     public bool HasAlphaFormat =>
-        Format is BCFormat.BC3 or BCFormat.BC7 or BCFormat.A8R8G8B8;
+        HasAlphaChannel;
 
     /// <summary>True if the format uses block compression (BC1-BC7).</summary>
     public bool IsBlockCompressed => Formats.IsBlockCompressed(Format);
 
+    /// <summary>True if the format can carry an alpha channel.</summary>
+    public bool HasAlphaChannel => Format is
+        BCFormat.BC1A or BCFormat.BC2 or BCFormat.BC3 or BCFormat.BC7 or
+        BCFormat.A8R8G8B8 or BCFormat.R8G8B8A8 or BCFormat.A8 or
+        BCFormat.B5G5R5A1 or BCFormat.R10G10B10A2 or
+        BCFormat.R16G16B16A16_FLOAT or BCFormat.R32G32B32A32_FLOAT;
+
     /// <summary>Nearest power-of-two dimensions for this texture.</summary>
     public (int Width, int Height) PotDimensions =>
-        (NativeMethods.tf_next_power_of_two(Width),
-         NativeMethods.tf_next_power_of_two(Height));
+        (NativeMethods.tf_nearest_power_of_two(Width),
+         NativeMethods.tf_nearest_power_of_two(Height));
 
     /// <summary>
     /// Check if the texture has any non-opaque pixels.
@@ -77,7 +84,7 @@ public sealed class Texture
 
     /// <summary>Load an image file and compress it.</summary>
     public static Texture FromImage(string path,
-        BCFormat format = BCFormat.BC7,
+        BCFormat format = BCFormat.BC1,
         float quality = 0.7f,
         bool generateMipmaps = true,
         int minMipSize = 4,
@@ -104,7 +111,7 @@ public sealed class Texture
 
     /// <summary>Create a Texture from raw RGBA pixel data in memory.</summary>
     public static Texture FromPixels(byte[] rgbaData, int width, int height,
-        BCFormat format = BCFormat.BC7,
+        BCFormat format = BCFormat.BC1,
         float quality = 0.7f,
         bool generateMipmaps = true,
         int minMipSize = 4,
@@ -134,14 +141,28 @@ public sealed class Texture
 
     /// <summary>Load an image from in-memory bytes and compress it.</summary>
     public static Texture FromBytes(byte[] data,
-        BCFormat format = BCFormat.BC7,
+        BCFormat format = BCFormat.BC1,
         float quality = 0.7f,
         bool generateMipmaps = true,
         int minMipSize = 4,
         bool resizeToPot = true,
         MipFilter mipFilter = MipFilter.Mitchell,
+        bool recompress = false,
         string name = "")
     {
+        if (data.Length >= 4 &&
+            data[0] == (byte)'D' && data[1] == (byte)'D' &&
+            data[2] == (byte)'S' && data[3] == (byte)' ')
+        {
+            if (!recompress)
+                return FromDdsBytes(data, name);
+
+            var tex = FromDdsBytes(data, name);
+            var (rgba, w, h) = tex.ToRgba(0);
+            return FromPixels(rgba, w, h, format, quality, generateMipmaps,
+                minMipSize, resizeToPot, mipFilter, string.IsNullOrEmpty(name) ? tex.Name : name);
+        }
+
         unsafe
         {
             fixed (byte* ptr = data)
@@ -181,6 +202,28 @@ public sealed class Texture
         }
     }
 
+    /// <summary>Load an existing DDS file from in-memory bytes.</summary>
+    public static Texture FromDdsBytes(byte[] data, string name = "")
+    {
+        unsafe
+        {
+            fixed (byte* ptr = data)
+            {
+                IntPtr c = NativeMethods.tf_load_dds_memory((IntPtr)ptr, (nuint)data.Length);
+                if (c == IntPtr.Zero)
+                    throw new InvalidOperationException("Failed to parse DDS from bytes");
+                try
+                {
+                    return FromCompressedHandle(c, name);
+                }
+                finally
+                {
+                    NativeMethods.tf_free_compressed(c);
+                }
+            }
+        }
+    }
+
     /// <summary>Create from raw compressed pixel data (for internal/advanced use).</summary>
     public static Texture FromRaw(byte[] data, int width, int height,
         BCFormat format, int mipCount, int[] mipOffsets, int[] mipSizes, string name = "")
@@ -194,8 +237,30 @@ public sealed class Texture
     public void SaveDds(string path) => File.WriteAllBytes(path, ToDdsBytes());
 
     /// <summary>Return complete DDS file as a byte array.</summary>
-    public byte[] ToDdsBytes() =>
-        DdsBuilder.Build(Width, Height, Format, MipCount, MipSizes, Data);
+    public byte[] ToDdsBytes()
+    {
+        IntPtr c = ToCompressedHandle();
+        try
+        {
+            int rc = NativeMethods.tf_save_dds_memory(c, out IntPtr data, out nuint size);
+            if (rc != 0 || data == IntPtr.Zero)
+                throw new InvalidOperationException($"Failed to save DDS to memory (error {rc})");
+            try
+            {
+                byte[] result = new byte[(int)size];
+                Marshal.Copy(data, result, 0, result.Length);
+                return result;
+            }
+            finally
+            {
+                NativeMethods.tf_free_buffer(data);
+            }
+        }
+        finally
+        {
+            NativeMethods.tf_free_compressed(c);
+        }
+    }
 
     // ── Decompression ───────────────────────────────────────────────────
 
@@ -224,6 +289,56 @@ public sealed class Texture
         {
             NativeMethods.tf_free_compressed(c);
         }
+    }
+
+    /// <summary>Resize this texture, then recompress it with the same format.</summary>
+    public Texture Resize(int width, int height,
+        float quality = 0.7f,
+        bool generateMipmaps = true,
+        int minMipSize = 4,
+        MipFilter mipFilter = MipFilter.Mitchell)
+    {
+        var (rgba, w, h) = ToRgba(0);
+        unsafe
+        {
+            fixed (byte* ptr = rgba)
+            {
+                IntPtr img = NativeMethods.tf_create_image(w, h, (IntPtr)ptr);
+                if (img == IntPtr.Zero)
+                    throw new InvalidOperationException("Failed to create image from decompressed texture");
+                try
+                {
+                    IntPtr resized = NativeMethods.tf_resize(img, width, height, (int)mipFilter);
+                    if (resized == IntPtr.Zero)
+                        throw new InvalidOperationException("Failed to resize texture");
+                    try
+                    {
+                        return CompressImage(resized, Format, quality, generateMipmaps,
+                            minMipSize, resizeToPot: false, mipFilter, Name);
+                    }
+                    finally
+                    {
+                        NativeMethods.tf_free_image(resized);
+                    }
+                }
+                finally
+                {
+                    NativeMethods.tf_free_image(img);
+                }
+            }
+        }
+    }
+
+    /// <summary>Recompress this texture to a different format.</summary>
+    public Texture ToFormat(BCFormat format,
+        float quality = 0.7f,
+        bool generateMipmaps = true,
+        int minMipSize = 4,
+        MipFilter mipFilter = MipFilter.Mitchell)
+    {
+        var (rgba, w, h) = ToRgba(0);
+        return FromPixels(rgba, w, h, format, quality, generateMipmaps,
+            minMipSize, resizeToPot: false, mipFilter, Name);
     }
 
     // ── Quality metrics ─────────────────────────────────────────────────
@@ -309,18 +424,21 @@ public sealed class Texture
 
     private IntPtr ToCompressedHandle()
     {
-        string tmpPath = Path.GetTempFileName() + ".dds";
-        try
+        nuint[] offsets = MipOffsets.Select(o => (nuint)o).ToArray();
+        nuint[] sizes = MipSizes.Select(s => (nuint)s).ToArray();
+        unsafe
         {
-            File.WriteAllBytes(tmpPath, ToDdsBytes());
-            IntPtr c = NativeMethods.tf_load_dds(tmpPath);
-            if (c == IntPtr.Zero)
-                throw new InvalidOperationException("Failed to create compressed handle");
-            return c;
-        }
-        finally
-        {
-            try { File.Delete(tmpPath); } catch { }
+            fixed (byte* dataPtr = Data)
+            fixed (nuint* offsetsPtr = offsets)
+            fixed (nuint* sizesPtr = sizes)
+            {
+                IntPtr c = NativeMethods.tf_create_compressed(
+                    (IntPtr)dataPtr, (nuint)Data.Length, Width, Height, (int)Format,
+                    MipCount, (IntPtr)offsetsPtr, (IntPtr)sizesPtr);
+                if (c == IntPtr.Zero)
+                    throw new InvalidOperationException("Failed to create compressed handle");
+                return c;
+            }
         }
     }
 
@@ -349,7 +467,7 @@ public sealed class Texture
             try
             {
                 var tex = FromCompressedHandle(c, name);
-                tex._hasTransparency = transparent;
+                tex._hasTransparency = transparent && tex.HasAlphaFormat;
                 return tex;
             }
             finally
@@ -386,6 +504,17 @@ public sealed class Texture
 
         return new Texture(data, width, height, format, mipCount, offsets, sizes, name);
     }
+
+    public override bool Equals(object? obj) =>
+        obj is Texture other &&
+        Width == other.Width &&
+        Height == other.Height &&
+        Format == other.Format &&
+        MipCount == other.MipCount &&
+        Data.SequenceEqual(other.Data);
+
+    public override int GetHashCode() =>
+        HashCode.Combine(Width, Height, Format, MipCount, Data.Length);
 
     public override string ToString() =>
         $"Texture(Name={Name}, {Width}x{Height}, Format={Format}, Mips={MipCount})";

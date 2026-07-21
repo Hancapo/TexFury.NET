@@ -1,25 +1,28 @@
 # TexFury.NET
 
-Fast image-to-DDS conversion and YTD texture dictionary toolkit for .NET.
+Fast image-to-DDS conversion and RAGE texture dictionary toolkit for .NET.
 
-Built on **bc7enc_rdo** + **ISPC bc7e** for high-quality BC1/BC3/BC4/BC5/BC7 compression, with support for uncompressed A8R8G8B8 textures. No DirectXTex dependency — a single native DLL handles everything.
+Built on **bc7enc_rdo** + **ISPC bc7e** for high-quality BC1/BC3/BC4/BC5/BC7 compression, with pixel conversion for common uncompressed formats. No DirectXTex dependency — a single native DLL handles everything.
 
 > This is the .NET port of the [Python texfury](https://github.com/Hancapo/texfury) package. Identical functionality, same native backend.
+> Synced with Python `texfury` **1.6.0**.
 
 ## Features
 
-- **BC1, BC3, BC4, BC5, BC7** block compression with adjustable quality (0.0–1.0)
-- **A8R8G8B8** uncompressed 32-bit BGRA format
+- **21 texture formats** — BC1/BC1A/BC2-BC7 block formats plus A8R8G8B8, R8G8B8A8, B5G6R5, B5G5R5A1, R10G10B10A2, R8, A8, R8G8, and float/half-float variants
+- **BC1, BC3, BC4, BC5, BC7** native encoding with adjustable quality (0.0–1.0)
 - **DDS** file read/write (legacy + DX10 extended headers)
-- **YTD** texture dictionary creation, extraction, and editing
+- **Texture dictionaries** — create, inspect, extract, merge, and edit `.wtd` (GTA IV) and `.ytd` (GTA V, GTA V gen9, RDR2)
 - **Decompression** — decompress any texture back to RGBA pixels
 - **Format suggestion** — auto-detect the best BCFormat for your image
+- **Automatic texture repair** — fix missing mipmaps, non-POT dimensions, and optimize BC1/BC3 choices
 - **Quality metrics** — PSNR (RGB/RGBA) and SSIM comparison
 - **Texture validation** — detect common issues (non-POT, size mismatch, etc.)
 - **DDS/YTD inspection** — read metadata without loading pixel data
 - **Mipmap generation** with configurable minimum size and 6 downsampling filters
 - **Automatic power-of-two resize** (sRGB-aware via stb_image_resize2)
 - **Transparency detection** without manual pixel iteration
+- **Oodle & Deflate compression** for RDR2 resources when a compatible `oo2core_*_win64.dll` is available
 - **Batch operations** with progress callbacks
 - **Zero dependencies** — targets .NET Standard 2.1
 
@@ -28,6 +31,25 @@ Built on **bc7enc_rdo** + **ISPC bc7e** for high-quality BC1/BC3/BC4/BC5/BC7 com
 Add the `TexFury` project reference or NuGet package. The pre-compiled `texfury_native.dll` is bundled and copied to output automatically.
 
 > **Target:** .NET Standard 2.1 — compatible with .NET Core 3.0+, .NET 5/6/7/8+, Unity 2021+, and Mono.
+
+### Optional ImageSharp integration
+
+Use `TexFury.ImageSharp` when you want Pillow-like interop with a fully managed, cross-platform image library.
+
+```csharp
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
+using TexFury;
+
+using Image<Rgba32> image = Image.Load<Rgba32>("logo.png");
+
+var tex = image.ToTexFuryTexture(format: BCFormat.BC7, name: "logo");
+using Image<Rgba32> decoded = tex.ToImageSharp();
+
+bool hasAlpha = TextureImageSharp.HasTransparency(image);
+```
+
+`TexFury.ImageSharp` targets .NET 6+ and depends on `SixLabors.ImageSharp`; the core `TexFury` package remains dependency-free.
 
 ---
 
@@ -42,25 +64,35 @@ var tex = Texture.FromImage("logo.png", format: BCFormat.BC7, quality: 0.8f);
 tex.SaveDds("logo.dds");
 ```
 
-### Create a YTD from a folder of images
+### Create a texture dictionary from a folder of images
 
 ```csharp
 using TexFury;
 
+// GTA V legacy (default)
 YtdFile.CreateFromFolder(
     "my_textures/",
     "output.ytd",
     format: BCFormat.BC3,
     quality: 0.7f
 );
+
+// GTA IV
+ItdFile.CreateFromFolder("my_textures/", "output.wtd", game: Game.GtaIV);
+
+// GTA V gen9
+ItdFile.CreateFromFolder("my_textures/", "output.ytd", game: Game.GtaVGen9);
+
+// RDR2
+ItdFile.CreateFromFolder("my_textures/", "output.ytd", game: Game.Rdr2);
 ```
 
-### Extract textures from a YTD
+### Extract textures from a dictionary
 
 ```csharp
 using TexFury;
 
-YtdFile.ExtractYtd("vehicles.ytd", "extracted/");
+ItdFile.Extract("vehicles.ytd", "extracted/");
 // Creates extracted/texture_name.dds for each texture
 ```
 
@@ -77,11 +109,18 @@ using TexFury;
 | Value | Name | Description |
 |-------|------|-------------|
 | `BCFormat.BC1` | DXT1 | RGB, 6:1 ratio. No alpha. Smallest files. |
+| `BCFormat.BC1A` | DXT1 | BC1/DXT1 with 1-bit punch-through alpha. |
+| `BCFormat.BC2` | DXT3 | RGBA, 4:1 ratio. Explicit 4-bit alpha. |
 | `BCFormat.BC3` | DXT5 | RGBA, 4:1 ratio. Full alpha channel. |
 | `BCFormat.BC4` | ATI1 | Single channel (R), 4:1 ratio. Grayscale/height maps. |
 | `BCFormat.BC5` | ATI2 | Two channels (RG), 4:1 ratio. Normal maps. |
+| `BCFormat.BC6H` | BC6H | HDR RGB, half-float block compression. |
 | `BCFormat.BC7` | BC7 | RGBA, 4:1 ratio. Best quality, slowest to encode. |
 | `BCFormat.A8R8G8B8` | Uncompressed | 32-bit BGRA. No compression, largest files. |
+| `BCFormat.R8G8B8A8` | Uncompressed | 32-bit RGBA. |
+| `BCFormat.B5G6R5` / `BCFormat.B5G5R5A1` | Uncompressed | 16-bit legacy formats. |
+| `BCFormat.R8`, `A8`, `R8G8` | Uncompressed | 8/16-bit small channel formats. |
+| `BCFormat.R16_FLOAT` etc. | Uncompressed | HDR float and half-float formats. |
 
 **Choosing a format:**
 

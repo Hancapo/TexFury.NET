@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\TexFury\TexFury.csproj" />
+    <ProjectReference Include="..\..\src\TexFury.ImageSharp\TexFury.ImageSharp.csproj" />
   </ItemGroup>
 
 </Project>

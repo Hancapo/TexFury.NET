@@ -80,6 +80,38 @@ internal static class Resource
         return result;
     }
 
+    public static byte[] ZlibCompress(byte[] data)
+    {
+        byte[] deflated = DeflateCompress(data);
+        byte[] result = new byte[2 + deflated.Length + 4];
+        result[0] = 0x78;
+        result[1] = 0xDA;
+        Array.Copy(deflated, 0, result, 2, deflated.Length);
+        uint adler = Adler32(data);
+        BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(result.Length - 4), adler);
+        return result;
+    }
+
+    public static byte[] ZlibDecompress(byte[] data, int expectedSize)
+    {
+        if (data.Length >= 6 && data[0] == 0x78)
+            return DeflateDecompress(data[2..^4], expectedSize);
+        return DeflateDecompress(data, expectedSize);
+    }
+
+    private static uint Adler32(byte[] data)
+    {
+        const uint mod = 65521;
+        uint a = 1;
+        uint b = 0;
+        foreach (byte value in data)
+        {
+            a = (a + value) % mod;
+            b = (b + a) % mod;
+        }
+        return (b << 16) | a;
+    }
+
     public static byte[] BuildRsc7(byte[] virtualData, byte[] physicalData,
                                     int version = Rsc7VersionYtd)
     {

@@ -10,7 +10,7 @@ namespace TexFury;
 public sealed class ItdFile
 {
     private readonly List<Texture> _textures = [];
-    private readonly Game _game;
+    private Game _game;
 
     public ItdFile(Game game = Game.GtaVLegacy) => _game = game;
 
@@ -61,14 +61,168 @@ public sealed class ItdFile
         return true;
     }
 
+    public void Merge(ItdFile other, bool overwrite = false)
+    {
+        var existing = new HashSet<string>(_textures.Select(t => t.Name), StringComparer.OrdinalIgnoreCase);
+        foreach (var tex in other.Textures)
+        {
+            if (existing.Contains(tex.Name))
+            {
+                if (overwrite)
+                    Replace(tex.Name, tex);
+                continue;
+            }
+
+            _textures.Add(tex);
+            existing.Add(tex.Name);
+        }
+    }
+
+    public static ItdFile MergeMany(IEnumerable<string> paths, Game? game = null, bool overwrite = false)
+    {
+        var list = paths.ToList();
+        if (list.Count == 0)
+            throw new ArgumentException("paths must not be empty", nameof(paths));
+
+        var result = Load(list[0]);
+        if (game.HasValue)
+            result._game = game.Value;
+
+        for (int i = 1; i < list.Count; i++)
+            result.Merge(Load(list[i]), overwrite);
+
+        return result;
+    }
+
+    public List<Dictionary<string, object>> Convert(Game game,
+        float quality = 0.7f,
+        bool generateMipmaps = true,
+        int minMipSize = 4,
+        MipFilter mipFilter = MipFilter.Mitchell)
+    {
+        var report = new List<Dictionary<string, object>>();
+        if (game != Game.GtaIV)
+            return SetGameAndReturn(game, report);
+
+        for (int i = 0; i < _textures.Count; i++)
+        {
+            var tex = _textures[i];
+            if (Formats.IsGta4Supported(tex.Format))
+                continue;
+
+            BCFormat newFormat = tex.Format switch
+            {
+                BCFormat.BC4 or BCFormat.BC5 or BCFormat.BC6H => BCFormat.BC1,
+                BCFormat.BC7 => tex.HasTransparency() ? BCFormat.BC3 : BCFormat.BC1,
+                BCFormat.R8G8B8A8 or BCFormat.R10G10B10A2 or
+                    BCFormat.R16G16B16A16_FLOAT or BCFormat.R32G32B32A32_FLOAT => BCFormat.A8R8G8B8,
+                BCFormat.R8G8 or BCFormat.R16G16_FLOAT => BCFormat.R8,
+                BCFormat.R16_FLOAT or BCFormat.R32_FLOAT => BCFormat.R8,
+                _ => BCFormat.BC1,
+            };
+
+            _textures[i] = tex.ToFormat(newFormat, quality, generateMipmaps, minMipSize, mipFilter);
+            report.Add(new Dictionary<string, object>
+            {
+                ["name"] = tex.Name,
+                ["old_format"] = tex.Format.ToString(),
+                ["new_format"] = newFormat.ToString(),
+            });
+        }
+
+        return SetGameAndReturn(game, report);
+    }
+
+    private List<Dictionary<string, object>> SetGameAndReturn(Game game, List<Dictionary<string, object>> report)
+    {
+        _game = game;
+        return report;
+    }
+
+    public List<Dictionary<string, object>> FixTextures(
+        float quality = 0.7f,
+        int minMipSize = 4,
+        MipFilter mipFilter = MipFilter.Mitchell,
+        ISet<string>? ignore = null,
+        Action<int, int, string>? onProgress = null)
+    {
+        var report = new List<Dictionary<string, object>>();
+        var skip = ignore is null
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(ignore, StringComparer.OrdinalIgnoreCase);
+
+        int total = _textures.Count;
+        for (int idx = 0; idx < total; idx++)
+        {
+            var tex = _textures[idx];
+            onProgress?.Invoke(idx + 1, total, tex.Name);
+
+            if (skip.Contains(tex.Name))
+                continue;
+
+            var fixes = new List<string>();
+            int expectedMips = 1;
+            int dim = Math.Max(tex.Width, tex.Height);
+            while (dim > minMipSize)
+            {
+                dim /= 2;
+                expectedMips++;
+            }
+
+            bool needsPot = !tex.IsPowerOfTwo;
+            bool needsMips = tex.MipCount < expectedMips && Math.Max(tex.Width, tex.Height) >= 8;
+            bool needsFormat = false;
+            BCFormat suggestedFormat = tex.Format;
+
+            if (Formats.IsBlockCompressed(tex.Format))
+            {
+                bool transparent = tex.HasTransparency();
+                if (transparent && tex.Format == BCFormat.BC1)
+                {
+                    suggestedFormat = BCFormat.BC3;
+                    needsFormat = true;
+                    fixes.Add("format BC1->BC3 (has transparency)");
+                }
+                else if (!transparent && tex.Format is BCFormat.BC1A or BCFormat.BC3 or BCFormat.BC7)
+                {
+                    suggestedFormat = BCFormat.BC1;
+                    needsFormat = true;
+                    fixes.Add($"format {tex.Format}->BC1 (opaque)");
+                }
+            }
+
+            if (needsPot)
+                fixes.Add("resize to power-of-two");
+            if (needsMips)
+                fixes.Add($"mipmaps {tex.MipCount}->{expectedMips}");
+
+            if (!needsPot && !needsMips && !needsFormat)
+                continue;
+
+            var (rgba, w, h) = tex.ToRgba(0);
+            _textures[idx] = Texture.FromPixels(rgba, w, h, suggestedFormat,
+                quality, generateMipmaps: true, minMipSize: minMipSize,
+                resizeToPot: true, mipFilter: mipFilter, name: tex.Name);
+
+            report.Add(new Dictionary<string, object>
+            {
+                ["name"] = tex.Name,
+                ["fixes"] = fixes,
+            });
+        }
+
+        return report;
+    }
+
     // ── Save / Load / Inspect ───────────────────────────────────────────
 
-    public void Save(string path)
+    public void Save(string path, RscCompression? compression = null)
     {
         byte[] data = _game switch
         {
+            Game.GtaIV => BuildGta4(),
             Game.GtaVEnhanced => BuildEnhanced(),
-            Game.Rdr2 => BuildRdr2(),
+            Game.Rdr2 => BuildRdr2(compression ?? RscCompression.Oodle),
             _ => BuildGtaV(),
         };
         File.WriteAllBytes(path, data);
@@ -80,6 +234,7 @@ public sealed class ItdFile
         Game game = DetectGame(fileData);
         return game switch
         {
+            Game.GtaIV => ParseGta4(fileData),
             Game.GtaVEnhanced => ParseEnhanced(fileData),
             Game.Rdr2 => ParseRdr2(fileData),
             _ => ParseGtaV(fileData),
@@ -92,6 +247,7 @@ public sealed class ItdFile
         Game game = DetectGame(fileData);
         return game switch
         {
+            Game.GtaIV => InspectGta4(fileData),
             Game.GtaVEnhanced => InspectEnhanced(fileData),
             Game.Rdr2 => InspectRdr2(fileData),
             _ => InspectGtaV(fileData),
@@ -111,6 +267,8 @@ public sealed class ItdFile
         if (data.Length < 16)
             throw new InvalidDataException("File too short to detect format");
         uint magic = BinaryPrimitives.ReadUInt32LittleEndian(data);
+        if (magic == Rsc5.Rsc5Magic)
+            return Game.GtaIV;
         if (magic == Resource.Rsc7Magic)
         {
             uint version = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(4));
@@ -185,6 +343,22 @@ public sealed class ItdFile
             h = Math.Max(1, h / 2);
         }
         return (offsets, sizes);
+    }
+
+    private static byte[] SliceTextureData(byte[] physicalData, int physOff, int dataSize,
+        string name, int width, int height, int mipLevels)
+    {
+        if (width <= 0 || height <= 0)
+            throw new InvalidDataException($"Invalid dimensions for '{name}': {width}x{height}");
+        if (mipLevels < 1)
+            throw new InvalidDataException($"Invalid mip count for '{name}': {mipLevels}");
+        if (physOff < 0 || dataSize < 0 || physOff + dataSize > physicalData.Length)
+            throw new InvalidDataException(
+                $"Texture data for '{name}' is outside the physical buffer (offset={physOff}, size={dataSize}, buffer={physicalData.Length})");
+
+        byte[] pixelData = new byte[dataSize];
+        Array.Copy(physicalData, physOff, pixelData, 0, dataSize);
+        return pixelData;
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -350,8 +524,8 @@ public sealed class ItdFile
 
             int physOff = P2O(dataPtr);
             int dataSize = Formats.TotalMipDataSize(width, height, fmt, mipLevels);
-            byte[] pixelData = new byte[dataSize];
-            Array.Copy(physicalData, physOff, pixelData, 0, dataSize);
+            byte[] pixelData = SliceTextureData(physicalData, physOff, dataSize,
+                name, width, height, mipLevels);
 
             var (offsets, sizes) = BuildMipInfo(width, height, fmt, mipLevels);
             itd.Add(Texture.FromRaw(pixelData, width, height, fmt, mipLevels, offsets, sizes, name));
@@ -407,7 +581,7 @@ public sealed class ItdFile
     private const byte Rdr2Dim2D = 1;
     private const long Rdr2SrvDim2D = 0x0401;
 
-    private byte[] BuildRdr2()
+    private byte[] BuildRdr2(RscCompression compression = RscCompression.Oodle)
     {
         var entries = _textures.OrderBy(t => Joaat(t.Name)).ToList();
         int n = entries.Count;
@@ -553,7 +727,7 @@ public sealed class ItdFile
         for (int i = 0; i < physDataList.Count; i++)
             Array.Copy(physDataList[i], 0, pbuf, physOffsets[i], physDataList[i].Length);
 
-        return Rsc8.BuildRsc8(vbuf, pbuf);
+        return Rsc8.BuildRsc8(vbuf, pbuf, compression: compression);
     }
 
     private static ItdFile ParseRdr2(byte[] fileData)
@@ -579,8 +753,8 @@ public sealed class ItdFile
             BCFormat fmt = Formats.FromRsc8(formatByte);
             int physOff = P2O(dataPtr);
             int dataSize = Formats.TotalMipDataSize(width, height, fmt, mipLevels);
-            byte[] pixelData = new byte[dataSize];
-            Array.Copy(physicalData, physOff, pixelData, 0, dataSize);
+            byte[] pixelData = SliceTextureData(physicalData, physOff, dataSize,
+                name, width, height, mipLevels);
 
             var (offsets, sizes) = BuildMipInfo(width, height, fmt, mipLevels);
             itd.Add(Texture.FromRaw(pixelData, width, height, fmt, mipLevels, offsets, sizes, name));
@@ -795,8 +969,8 @@ public sealed class ItdFile
             BCFormat fmt = Formats.FromRsc8(formatByte);
             int physOff = P2O(dataPtr);
             int dataSize = Formats.TotalMipDataSize(width, height, fmt, mipLevels);
-            byte[] pixelData = new byte[dataSize];
-            Array.Copy(physicalData, physOff, pixelData, 0, dataSize);
+            byte[] pixelData = SliceTextureData(physicalData, physOff, dataSize,
+                name, width, height, mipLevels);
 
             var (offsets, sizes) = BuildMipInfo(width, height, fmt, mipLevels);
             itd.Add(Texture.FromRaw(pixelData, width, height, fmt, mipLevels, offsets, sizes, name));
@@ -837,10 +1011,210 @@ public sealed class ItdFile
         return result;
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // GTA IV (RSC5 / .wtd)
+    // ═════════════════════════════════════════════════════════════════════
+
+    private const int Gta4TexSize = 80;
+    private const int Gta4DictSize = 32;
+    private const int Gta4BlockMapSize = 528;
+    private const int V32Base = 0x50000000;
+    private const int P32Base = 0x60000000;
+
+    private static int V2O32(uint addr) => (int)addr - V32Base;
+    private static int P2O32(uint addr) => (int)addr - P32Base;
+
+    private static string ReadNameGta4(byte[] virtualData, uint namePtr)
+    {
+        int off = V2O32(namePtr);
+        int end = Array.IndexOf(virtualData, (byte)0, off);
+        string raw = Encoding.UTF8.GetString(virtualData, off, end - off);
+        if (raw.StartsWith("pack:/", StringComparison.OrdinalIgnoreCase))
+            raw = raw[6..];
+        if (raw.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+            raw = raw[..^4];
+        return raw;
+    }
+
+    private byte[] BuildGta4()
+    {
+        var entries = _textures.OrderBy(t => Joaat(t.Name)).ToList();
+        int n = entries.Count;
+        if (n == 0)
+            throw new InvalidOperationException("Cannot create ITD with zero textures");
+
+        foreach (var e in entries)
+        {
+            if (!Formats.IsGta4Supported(e.Format))
+                throw new InvalidOperationException(
+                    $"Format {e.Format} is not supported by GTA IV. Convert to BC1, BC2, BC3, A8R8G8B8, B5G5R5A1, B5G6R5, A8, or R8 first.");
+        }
+
+        int blockmapOff = Gta4DictSize;
+        int hashOff = Align(blockmapOff + Gta4BlockMapSize, 16);
+        int ptrOff = Align(hashOff + n * 4, 16);
+        int texOffBase = Align(ptrOff + n * 4, 16);
+
+        int cur = texOffBase + Gta4TexSize * n;
+        var nameOffsets = new List<int>();
+        var nameBytesList = new List<byte[]>();
+        foreach (var e in entries)
+        {
+            nameOffsets.Add(cur);
+            byte[] encoded = Encoding.UTF8.GetBytes($"pack:/{e.Name}.dds\0");
+            nameBytesList.Add(encoded);
+            cur += encoded.Length;
+        }
+
+        int virtualSize = Align(cur, 16);
+
+        var physOffsets = new List<int>();
+        int physCur = 0;
+        foreach (var e in entries)
+        {
+            physOffsets.Add(physCur);
+            physCur += e.Data.Length;
+        }
+
+        byte[] vbuf = new byte[virtualSize];
+
+        W32(vbuf, 0x00, 0);
+        W32(vbuf, 0x04, (uint)(V32Base + blockmapOff));
+        W32(vbuf, 0x08, 0);
+        W32(vbuf, 0x0C, 1);
+        W32(vbuf, 0x10, (uint)(V32Base + hashOff));
+        W16(vbuf, 0x14, (ushort)n);
+        W16(vbuf, 0x16, (ushort)n);
+        W32(vbuf, 0x18, (uint)(V32Base + ptrOff));
+        W16(vbuf, 0x1C, (ushort)n);
+        W16(vbuf, 0x1E, (ushort)n);
+
+        W32(vbuf, blockmapOff, 0);
+        for (int i = 1; i < 132; i++)
+            W32(vbuf, blockmapOff + i * 4, 0xCDCDCDCD);
+
+        for (int i = 0; i < n; i++)
+            W32(vbuf, hashOff + 4 * i, Joaat(entries[i].Name));
+
+        for (int i = 0; i < n; i++)
+            W32(vbuf, ptrOff + 4 * i, (uint)(V32Base + texOffBase + Gta4TexSize * i));
+
+        for (int i = 0; i < n; i++)
+        {
+            var e = entries[i];
+            int off = texOffBase + Gta4TexSize * i;
+            uint formatVal = Formats.ToRsc5(e.Format);
+            int stride = e.Width * Formats.BitsPerPixel(e.Format) / 8;
+
+            W32(vbuf, off + 0x00, 0);
+            W32(vbuf, off + 0x04, 0);
+            W16(vbuf, off + 0x08, 1);
+            W16(vbuf, off + 0x0A, 0);
+            W32(vbuf, off + 0x0C, 0);
+            W32(vbuf, off + 0x10, 0);
+            W32(vbuf, off + 0x14, (uint)(V32Base + nameOffsets[i]));
+            W32(vbuf, off + 0x18, 0);
+
+            W16(vbuf, off + 0x1C, (ushort)e.Width);
+            W16(vbuf, off + 0x1E, (ushort)e.Height);
+            W32(vbuf, off + 0x20, formatVal);
+            W16(vbuf, off + 0x24, (ushort)stride);
+            vbuf[off + 0x26] = 0;
+            vbuf[off + 0x27] = (byte)e.MipCount;
+            WriteFloat(vbuf, off + 0x28, 1.0f);
+            WriteFloat(vbuf, off + 0x2C, 1.0f);
+            WriteFloat(vbuf, off + 0x30, 1.0f);
+            WriteFloat(vbuf, off + 0x34, 0.0f);
+            WriteFloat(vbuf, off + 0x38, 0.0f);
+            WriteFloat(vbuf, off + 0x3C, 0.0f);
+            W32(vbuf, off + 0x40, 0);
+            W32(vbuf, off + 0x44, 0);
+            W32(vbuf, off + 0x48, (uint)(P32Base + physOffsets[i]));
+            W32(vbuf, off + 0x4C, 0);
+        }
+
+        for (int i = 0; i < nameBytesList.Count; i++)
+            Array.Copy(nameBytesList[i], 0, vbuf, nameOffsets[i], nameBytesList[i].Length);
+
+        byte[] pbuf = new byte[physCur];
+        for (int i = 0; i < entries.Count; i++)
+            Array.Copy(entries[i].Data, 0, pbuf, physOffsets[i], entries[i].Data.Length);
+
+        return Rsc5.BuildRsc5(vbuf, pbuf);
+    }
+
+    private static ItdFile ParseGta4(byte[] fileData)
+    {
+        var (virtualData, physicalData) = Rsc5.DecompressRsc5(fileData);
+
+        int count = R16(virtualData, 0x14);
+        int ptrArrOff = V2O32(R32(virtualData, 0x18));
+
+        var itd = new ItdFile(Game.GtaIV);
+
+        for (int i = 0; i < count; i++)
+        {
+            int texOff = V2O32(R32(virtualData, ptrArrOff + 4 * i));
+
+            string name = ReadNameGta4(virtualData, R32(virtualData, texOff + 0x14));
+            int width = R16(virtualData, texOff + 0x1C);
+            int height = R16(virtualData, texOff + 0x1E);
+            uint formatVal = R32(virtualData, texOff + 0x20);
+            int mipLevels = virtualData[texOff + 0x27];
+            uint dataPtr = R32(virtualData, texOff + 0x48);
+
+            BCFormat fmt = Formats.FromRsc5(formatVal);
+            int physOff = P2O32(dataPtr);
+            int dataSize = Formats.TotalMipDataSize(width, height, fmt, mipLevels);
+            byte[] pixelData = SliceTextureData(physicalData, physOff, dataSize,
+                name, width, height, mipLevels);
+
+            var (offsets, sizes) = BuildMipInfo(width, height, fmt, mipLevels);
+            itd.Add(Texture.FromRaw(pixelData, width, height, fmt, mipLevels, offsets, sizes, name));
+        }
+
+        return itd;
+    }
+
+    private static List<TextureInfo> InspectGta4(byte[] fileData)
+    {
+        var (virtualData, _) = Rsc5.DecompressRsc5(fileData);
+
+        int count = R16(virtualData, 0x14);
+        int ptrArrOff = V2O32(R32(virtualData, 0x18));
+
+        var result = new List<TextureInfo>();
+        for (int i = 0; i < count; i++)
+        {
+            int texOff = V2O32(R32(virtualData, ptrArrOff + 4 * i));
+
+            string name = ReadNameGta4(virtualData, R32(virtualData, texOff + 0x14));
+            int width = R16(virtualData, texOff + 0x1C);
+            int height = R16(virtualData, texOff + 0x1E);
+            uint formatVal = R32(virtualData, texOff + 0x20);
+            int mipLevels = virtualData[texOff + 0x27];
+
+            BCFormat? fmt = null;
+            try { fmt = Formats.FromRsc5(formatVal); } catch { }
+
+            int dataSize = fmt.HasValue
+                ? Formats.TotalMipDataSize(width, height, fmt.Value, mipLevels)
+                : 0;
+
+            result.Add(new TextureInfo(name, width, height,
+                fmt ?? BCFormat.BC1, mipLevels, dataSize));
+        }
+
+        return result;
+    }
+
+    private static void WriteFloat(byte[] data, int offset, float value) =>
+        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(offset), BitConverter.SingleToInt32Bits(value));
+
     // ── High-level convenience methods ───────────────────────────────────
 
-    /// <summary>Create an ITD from all images in a folder.</summary>
-    public static string CreateFromFolder(string folder, string? output = null,
+    /// <summary>Build an ITD from all images/DDS files in a folder without writing it.</summary>
+    public static ItdFile FromFolder(string folder,
         Game game = Game.GtaVLegacy,
         BCFormat format = BCFormat.BC7, float quality = 0.7f,
         bool generateMipmaps = true, int minMipSize = 4,
@@ -849,9 +1223,6 @@ public sealed class ItdFile
     {
         if (!Directory.Exists(folder))
             throw new DirectoryNotFoundException($"Not a directory: {folder}");
-
-        output ??= Path.Combine(Path.GetDirectoryName(folder)!,
-                                Path.GetFileName(folder) + ".ytd");
 
         var files = Directory.GetFiles(folder)
             .Where(f => ImageExtensions.Contains(Path.GetExtension(f)) ||
@@ -878,6 +1249,24 @@ public sealed class ItdFile
             itd.Add(tex);
         }
 
+        return itd;
+    }
+
+    /// <summary>Create an ITD from all images in a folder.</summary>
+    public static string CreateFromFolder(string folder, string? output = null,
+        Game game = Game.GtaVLegacy,
+        BCFormat format = BCFormat.BC7, float quality = 0.7f,
+        bool generateMipmaps = true, int minMipSize = 4,
+        MipFilter mipFilter = MipFilter.Mitchell,
+        Action<int, int, string>? onProgress = null)
+    {
+        if (!Directory.Exists(folder))
+            throw new DirectoryNotFoundException($"Not a directory: {folder}");
+
+        output ??= Path.Combine(Path.GetDirectoryName(folder)!,
+                                Path.GetFileName(folder) + (game == Game.GtaIV ? ".wtd" : ".ytd"));
+
+        var itd = FromFolder(folder, game, format, quality, generateMipmaps, minMipSize, mipFilter, onProgress);
         itd.Save(output);
         return output;
     }
@@ -929,6 +1318,15 @@ public sealed class ItdFile
         foreach (var tex in itd.Textures)
             tex.SaveDds(Path.Combine(outputDir, tex.Name + ".dds"));
 
+        return outputDir;
+    }
+
+    /// <summary>Extract all textures from this ITD as DDS files.</summary>
+    public string ExtractTo(string outputDir)
+    {
+        Directory.CreateDirectory(outputDir);
+        foreach (var tex in _textures)
+            tex.SaveDds(Path.Combine(outputDir, tex.Name + ".dds"));
         return outputDir;
     }
 }

@@ -30,9 +30,13 @@ public static class ImageUtils
     public static int NextPowerOfTwo(int value) =>
         NativeMethods.tf_next_power_of_two(value);
 
+    /// <summary>Return the nearest power of two to value.</summary>
+    public static int NearestPowerOfTwo(int value) =>
+        NativeMethods.tf_nearest_power_of_two(value);
+
     /// <summary>Return the nearest power-of-two dimensions for the given size.</summary>
     public static (int Width, int Height) PotDimensions(int width, int height) =>
-        (NativeMethods.tf_next_power_of_two(width), NativeMethods.tf_next_power_of_two(height));
+        (NativeMethods.tf_nearest_power_of_two(width), NativeMethods.tf_nearest_power_of_two(height));
 
     /// <summary>Get image dimensions and channel count.</summary>
     public static (int Width, int Height, int Channels) ImageDimensions(string path)
